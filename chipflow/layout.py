@@ -67,13 +67,19 @@ def write_svg(path, net, pl, lib, critical=None, scale=6.0):
         f.write("\n".join(s))
 
 
-def write_congestion_svg(path, grid, scale=6.0):
-    g = grid.g
+def congestion_map(grid):
+    """Per-gcell routing utilization: the worst use/capacity of the four boundary edges."""
     util = np.zeros((grid.ny, grid.nx))
     util[:, :-1] = np.maximum(util[:, :-1], grid.use_h / grid.cap_h)
     util[:, 1:] = np.maximum(util[:, 1:], grid.use_h / grid.cap_h)
     util[:-1, :] = np.maximum(util[:-1, :], grid.use_v / grid.cap_v)
     util[1:, :] = np.maximum(util[1:, :], grid.use_v / grid.cap_v)
+    return util
+
+
+def write_congestion_svg(path, grid, scale=6.0):
+    g = grid.g
+    util = congestion_map(grid)
     W, H = grid.nx * g * scale, grid.ny * g * scale
     s = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W:.0f} {H:.0f}" width="{W:.0f}" height="{H:.0f}">']
     for y in range(grid.ny):

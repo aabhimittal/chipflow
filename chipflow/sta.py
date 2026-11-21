@@ -112,11 +112,15 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None) -> d
     ends.sort(key=lambda e: e[0])
     wns = ends[0][0] if ends else 0.0
     path = _trace(net, at, wire, ends[0]) if ends else []
+    worst_per_endpoint = {}
+    for e in ends:  # sorted worst first: keep each endpoint's worse edge (rise or fall)
+        worst_per_endpoint.setdefault(e[1], round(e[0], 4))
     return {"period_ns": period_ns, "wns_ns": round(wns, 4), "tns_ns": round(sum(min(0.0, e[0]) for e in ends), 3),
             "endpoints": len(ends) // 2, "failing_endpoints": len({e[1] for e in ends if e[0] < 0}),
             "fmax_mhz": round(1000.0 / (period_ns - wns), 1) if period_ns - wns > 0 else None,
             "critical_endpoint": ends[0][1] if ends else None, "critical_path": path,
-            "slack_by_endpoint": {e[1]: round(e[0], 4) for e in ends}}
+            "critical_sink_idx": ends[0][4][0] if ends and ends[0][4][0] != "port" else None,
+            "slack_by_endpoint": worst_per_endpoint}
 
 
 def _trace(net, at, wire, end):

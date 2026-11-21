@@ -1,0 +1,413 @@
+<title>chipflow layout explorer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Explore two AI-accelerator blocks taken from Verilog to a placed, timed and routed layout by the chipflow open EDA flow.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..700&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@400;600&display=swap">
+<style>
+/* Layout: a die shot with its datasheet. The placed chip is the hero, specs beside it, evidence below. */
+:root {
+  --bg: #eef1f4; --surface: #ffffff; --fg: #121821; --muted: #5a6573; --line: #d5dbe2; --chip: #e4e8ed;
+  --accent: #a8521c; --accent-soft: #f6e6da; --crit: #d1242f; --ok: #1f7a4d; --warn: #9a6200;
+  --die: #f7f8fa; --core: #ffffff; --core-line: #9aa3ae;
+  --display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --body: "Source Sans 3", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0d1218; --surface: #151c24; --fg: #e5ebf1; --muted: #9aa6b4; --line: #26313d; --chip: #1d2630;
+  --accent: #e3894f; --accent-soft: #3a2416; --crit: #ff5d5d; --ok: #4cc38a; --warn: #e3b341;
+  --die: #0f151c; --core: #131a22; --core-line: #3b4757; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0d1218; --surface: #151c24; --fg: #e5ebf1; --muted: #9aa6b4; --line: #26313d; --chip: #1d2630;
+  --accent: #e3894f; --accent-soft: #3a2416; --crit: #ff5d5d; --ok: #4cc38a; --warn: #e3b341;
+  --die: #0f151c; --core: #131a22; --core-line: #3b4757; color-scheme: dark; }
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 var(--body); }
+.wrap { max-width: 1160px; margin: 0 auto; padding-block: 32px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 52px; }
+h1, h2, h3 { font-family: var(--display); font-stretch: 85%; font-weight: 650; margin: 0; line-height: 1.12; text-wrap: balance; }
+h1 { font-size: clamp(2.1rem, 5.5vw, 3.4rem); letter-spacing: -0.01em; }
+h2 { font-size: 1.65rem; }
+h3 { font-size: 1.08rem; }
+p { margin: 0; max-width: 70ch; }
+a { color: var(--accent); }
+.mono, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.eyebrow { font: 500 0.74rem/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+header, section { display: grid; gap: 16px; }
+.lede { color: var(--muted); font-size: 1.08rem; }
+.flow { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 4px 0 0; counter-reset: s; }
+.flow li { font: 0.8rem var(--mono); background: var(--chip); padding: 5px 10px; border-radius: 4px; counter-increment: s; }
+.flow li::before { content: counter(s) " "; color: var(--accent); }
+details { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; }
+summary { cursor: pointer; font-weight: 600; }
+details.guide > summary { font-family: var(--display); font-stretch: 85%; font-size: 1.15rem; }
+.guide-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; margin-top: 14px; }
+.guide-grid > div { min-width: 0; display: grid; gap: 8px; align-content: start; }
+.guide-grid ol, .guide-grid ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; font-size: 0.93rem; }
+.guide-grid dl { margin: 0; display: grid; gap: 8px; font-size: 0.93rem; }
+.guide-grid dt { font-weight: 600; }
+.guide-grid dd { margin: 0; color: var(--muted); }
+.controls { display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: end; }
+.ctl { display: grid; gap: 6px; }
+.ctl > .lbl { font: 500 0.72rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.seg button { font: 600 0.9rem var(--body); color: var(--fg); background: transparent; border: 0; padding: 7px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.check { display: inline-flex; gap: 7px; align-items: center; font-size: 0.93rem; cursor: pointer; }
+.check input { accent-color: var(--accent); }
+.stage { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.die-box { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 8px; min-width: 0; }
+canvas { display: block; width: 100%; height: auto; border-radius: 4px; cursor: crosshair; touch-action: none; }
+.readout { font: 0.82rem/1.4 var(--mono); color: var(--muted); min-height: 2.8em; }
+.readout b { color: var(--fg); font-weight: 500; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.82rem; color: var(--muted); align-items: center; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
+.specs { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; display: grid; min-width: 0; }
+.specs h3 { padding: 14px 16px 6px; }
+.specs dl { margin: 0; display: grid; grid-template-columns: auto 1fr; }
+.specs dt, .specs dd { padding: 8px 16px; border-top: 1px solid var(--line); margin: 0; }
+.specs dt { color: var(--muted); font-size: 0.88rem; }
+.specs dd { text-align: right; font: 500 0.92rem var(--mono); font-variant-numeric: tabular-nums; }
+.pill { display: inline-block; font: 500 0.72rem/1 var(--mono); padding: 4px 8px; border-radius: 99px; background: var(--chip); margin-left: 6px; }
+.pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); }
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font: 500 0.7rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+tbody tr { cursor: pointer; }
+tbody tr:hover, tbody tr.on { background: var(--accent-soft); }
+.bar { display: inline-block; height: 8px; background: var(--accent); border-radius: 2px; vertical-align: middle; }
+.bar.wire { background: var(--muted); }
+.chart { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--muted); font: 10px var(--mono); }
+.steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; list-style: none; padding: 0; margin: 0; counter-reset: st; }
+.steps li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 4px; counter-increment: st; }
+.steps li h3::before { content: counter(st) ". "; color: var(--accent); }
+.steps .v { font: 500 0.9rem var(--mono); }
+.steps p { font-size: 0.88rem; color: var(--muted); }
+.read { font-size: 0.9rem; border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; max-width: 78ch; }
+pre { margin: 10px 0 0; overflow-x: auto; font: 0.8rem/1.5 var(--mono); background: var(--chip); padding: 12px; border-radius: 6px; max-height: 460px; }
+footer { display: grid; gap: 8px; color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--line); padding-top: 18px; }
+footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+@media (max-width: 860px) { .stage, .guide-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (prefers-reduced-motion: no-preference) { .seg button, tbody tr { transition: background 120ms; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">chipflow · open digital EDA flow · Nangate45 45 nm</div>
+    <h1>From Verilog to layout</h1>
+    <p class="lede">Two building blocks of AI accelerators, a TPU-style systolic array and a GPU-style SIMT core, taken through every step of a chip flow: synthesis, gate-level verification, placement, timing, routing and power. Everything on this page is real output of the flow.</p>
+    <ol class="flow" aria-label="Flow stages">
+      <li>Synthesis</li><li>Verification</li><li>Placement</li><li>Timing</li><li>Routing</li><li>Timing + power</li><li>DEF + reports</li>
+    </ol>
+  </header>
+
+  <details class="guide" open>
+    <summary>How to use and read this page</summary>
+    <div class="guide-grid">
+      <div>
+        <h3>Use it</h3>
+        <ol>
+          <li><b>Pick a design</b> above the layout: the systolic array or the SIMT core.</li>
+          <li><b>Hover the layout</b> to identify any cell: its block, its cell type and whether it is on the critical path. On a phone, tap.</li>
+          <li><b>Color by</b> block (which PE or lane a cell belongs to) or by kind (flip-flop vs. logic gate).</li>
+          <li><b>Toggle overlays:</b> the critical path, routing congestion and the I/O pins on the die edge.</li>
+          <li><b>Hover a row</b> in the critical-path table to find that gate on the layout.</li>
+          <li><b>Open the Verilog</b> at the bottom to see the source the layout was built from.</li>
+        </ol>
+      </div>
+      <div>
+        <h3>Read it</h3>
+        <dl>
+          <dt>The layout</dt><dd>A top view of the placed chip. The outer box is the die, the inner box the core where cells sit in 1.4 µm rows. Each small rectangle is one standard cell (a gate or flip-flop) from the Nangate45 library.</dd>
+          <dt>Critical path</dt><dd>The slowest chain of gates between two flip-flops (or from an input). Its delay sets the fastest clock the block can run at; the red line connects its cells in order.</dd>
+          <dt>Congestion</dt><dd>How full the routing tracks are in each 2.8 µm tile. Amber is near capacity; red tiles are over 100%, where wires would have to detour or the layout must spread out.</dd>
+          <dt>Slack and fmax</dt><dd>Slack is how much earlier than the clock edge a signal arrives; positive means it makes it. WNS is the worst slack; fmax = 1 / (clock period − WNS).</dd>
+        </dl>
+      </div>
+      <div>
+        <h3>Try this</h3>
+        <ul>
+          <li><b>Structure survives.</b> Color the systolic array by block: its 16 processing elements land as 16 tiles in a rough 4×4 grid, though nothing told the placer about the grid. Wires between neighbors pulled them there.</li>
+          <li><b>Where GPUs hurt.</b> Turn on congestion for the SIMT core. The red tiles sit over the register-file read muxes; the systolic array has none.</li>
+          <li><b>Follow the slowest path.</b> On the systolic array, the red line stays inside one PE: flip-flop → signed multiplier → adder → accumulator, 28 gates. On SIMT it starts at the instruction input and runs through register-file muxes into the ALU.</li>
+          <li><b>Count the memory.</b> Color the SIMT core by kind: 1,024 of its 1,088 flip-flops are register-file bits.</li>
+        </ul>
+      </div>
+    </div>
+  </details>
+
+  <section aria-labelledby="ex-h">
+    <div class="eyebrow">Layout explorer</div>
+    <h2 id="ex-h">The placed chip</h2>
+    <div class="controls">
+      <div class="ctl"><span class="lbl" id="d-l">Design</span><div class="seg" role="group" aria-labelledby="d-l" id="designSeg"></div></div>
+      <div class="ctl"><span class="lbl" id="c-l">Color by</span>
+        <div class="seg" role="group" aria-labelledby="c-l" id="colorSeg">
+          <button type="button" data-color="block" aria-pressed="true">Block</button>
+          <button type="button" data-color="kind">Cell kind</button>
+        </div></div>
+      <div class="ctl"><span class="lbl">Overlays</span>
+        <div class="checks">
+          <label class="check"><input type="checkbox" id="ovCrit" checked> Critical path</label>
+          <label class="check"><input type="checkbox" id="ovCong"> Congestion</label>
+          <label class="check"><input type="checkbox" id="ovIO" checked> I/O pins</label>
+        </div></div>
+    </div>
+    <div class="stage">
+      <div class="die-box">
+        <canvas id="die" width="900" height="900" aria-label="Placed layout of the selected design"></canvas>
+        <div class="readout" id="readout" aria-live="polite">Hover a cell to identify it.</div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div class="specs"><h3 id="specTitle">Loading…</h3><dl id="specs"></dl></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="cp-h">
+    <div class="eyebrow">Static timing</div>
+    <h2 id="cp-h">The critical path, gate by gate</h2>
+    <p class="read">Each row is one gate on the slowest path, in signal order. <b>Gate</b> is the cell's own delay from the Liberty tables (it grows with the load it drives); <b>wire</b> is the delay of the routed wire into it. <b>Arrival</b> is the running total. The last row must arrive before the clock period minus the capture flip-flop's setup time.</p>
+    <div class="table-wrap"><table id="cpTable">
+      <thead><tr><th>#</th><th>Block</th><th>Cell</th><th>Edge</th><th class="num">Gate ns</th><th class="num">Wire ns</th><th class="num">Arrival ns</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <section aria-labelledby="sl-h">
+    <div class="eyebrow">Timing margin</div>
+    <h2 id="sl-h">Slack at every endpoint</h2>
+    <p class="read">One bar per 50 ps slack band, counting the flip-flop inputs and outputs that land in it. Everything right of zero meets the clock. The leftmost bar holds the critical path; a long tail to the right means most of the block has room to spare and only a few paths need work.</p>
+    <div class="chart"><svg id="slack" viewBox="0 0 720 240" role="img" aria-label="Histogram of endpoint slack"></svg></div>
+  </section>
+
+  <section aria-labelledby="st-h">
+    <div class="eyebrow">The flow</div>
+    <h2 id="st-h">What each stage produced</h2>
+    <ol class="steps" id="steps"></ol>
+  </section>
+
+  <details><summary>Verilog source of the selected design</summary><pre id="src"></pre></details>
+
+  <footer>
+    <div class="eyebrow">What this is and is not</div>
+    <ul>
+      <li>Nangate45 is an open, purposely non-manufacturable 45 nm library. One typical timing corner, ideal clock (no clock tree yet), global routing only (no detailed routing), no DRC/LVS. Power excludes cell internal power.</li>
+      <li>Source: <a href="https://github.com/aabhimittal/chipflow" target="_blank" rel="noopener">github.com/aabhimittal/chipflow</a>. Regenerate this page's data with <span class="mono">python demo/build_data.py</span>.</li>
+    </ul>
+  </footer>
+</div>
+
+<script>
+(function () {
+  const $ = s => document.querySelector(s);
+  const S = { d: 0, color: "block", hover: -1, rowHi: -1 };
+  let D, base = null, rowIndex = null;
+  const cv = $("#die"), ctx = cv.getContext("2d");
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+  fetch("data.json").then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(d => { D = d; init(); })
+    .catch(e => { $("#specTitle").textContent = "Could not load the layout data (" + e.message + "). Reload to try again."; });
+
+  const des = () => D.designs[S.d];
+  const fmt = (v, k = 0) => Number(v).toLocaleString("en-US", { minimumFractionDigits: k, maximumFractionDigits: k });
+
+  function init() {
+    $("#designSeg").innerHTML = D.designs.map((d, i) => '<button type="button" data-i="' + i + '">' + (d.key === "systolic" ? "Systolic array" : "SIMT core") + "</button>").join("");
+    $("#designSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { S.d = +b.dataset.i; load(); } });
+    $("#colorSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { S.color = b.dataset.color; press("#colorSeg", "color", S.color); base = null; draw(); legend(); } });
+    ["#ovCrit", "#ovCong", "#ovIO"].forEach(id => $(id).addEventListener("change", () => { base = null; draw(); legend(); }));
+    cv.addEventListener("pointermove", hover);
+    cv.addEventListener("pointerdown", hover);
+    cv.addEventListener("pointerleave", () => { S.hover = -1; draw(); $("#readout").textContent = "Hover a cell to identify it."; });
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { base = null; draw(); });
+    new MutationObserver(() => { base = null; draw(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    load();
+  }
+  function press(sel, key, val) { document.querySelectorAll(sel + " button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset[key] === String(val)))); }
+
+  function load() {
+    const d = des();
+    press("#designSeg", "i", S.d);
+    const [, , W, H] = d.die, px = 900 / Math.max(W, H);
+    cv.width = Math.round(W * px); cv.height = Math.round(H * px);
+    rowIndex = new Map();
+    d.cells.y.forEach((y, i) => { const r = Math.round((y - d.core[1]) / d.row_h); (rowIndex.get(r) || rowIndex.set(r, []).get(r)).push(i); });
+    rowIndex.forEach(list => list.sort((a, b) => d.cells.x[a] - d.cells.x[b]));
+    d.critSet = new Map(d.critical.stages.map((s, k) => [s.idx, k]).filter(([i]) => i != null));
+    base = null; S.hover = -1; S.rowHi = -1;
+    specs(); table(); slack(); steps(); legend(); draw();
+    $("#src").textContent = d.verilog;
+  }
+
+  const hue = (g, n) => "hsl(" + Math.round(360 * g / n) + " 55% 58%)";
+  function cellColor(d, i) {
+    const t = d.types[d.cells.t[i]];
+    if (S.color === "kind") return t.ff ? css("--accent") : t.name.startsWith("LOGIC") ? "#8a94a0" : "#5b7fb0";
+    const g = d.cells.g[i];
+    return d.groups[g] === "shared" ? "#8a94a0" : hue(g, d.groups.length);
+  }
+  const X = x => x * cv.width / des().die[2];
+  const Y = y => cv.height - y * cv.height / des().die[3];
+
+  function render(target) {
+    const d = des(), c = target.getContext("2d"), s = cv.width / d.die[2];
+    c.fillStyle = css("--die"); c.fillRect(0, 0, cv.width, cv.height);
+    c.fillStyle = css("--core"); c.strokeStyle = css("--core-line"); c.lineWidth = 1;
+    c.fillRect(X(d.core[0]), Y(d.core[3]), X(d.core[2]) - X(d.core[0]), Y(d.core[1]) - Y(d.core[3]));
+    c.strokeRect(X(d.core[0]), Y(d.core[3]), X(d.core[2]) - X(d.core[0]), Y(d.core[1]) - Y(d.core[3]));
+    const rh = d.row_h * s;
+    for (let i = 0; i < d.cells.x.length; i++) {
+      c.fillStyle = cellColor(d, i);
+      c.fillRect(X(d.cells.x[i]) + 0.3, Y(d.cells.y[i]) - rh + 0.3, Math.max(0.6, d.types[d.cells.t[i]].w * s - 0.6), rh - 0.6);
+    }
+    if ($("#ovCong").checked) {
+      const g = d.congestion, gs = g.gcell * s;
+      for (let y = 0; y < g.ny; y++) for (let x = 0; x < g.nx; x++) {
+        const u = g.util[y * g.nx + x];
+        if (u < 0.6) continue;
+        c.fillStyle = u > 1 ? "rgba(209,36,47,0.75)" : u > 0.85 ? "rgba(214,145,40,0.45)" : "rgba(214,145,40,0.18)";
+        c.fillRect(x * gs, cv.height - (y + 1) * gs, gs, gs);
+      }
+    }
+    if ($("#ovIO").checked) {
+      c.fillStyle = css("--fg");
+      d.io.pins.forEach(([x, y]) => { c.beginPath(); c.arc(X(x), Y(y), 2.2, 0, 7); c.fill(); });
+    }
+    if ($("#ovCrit").checked) {
+      const pts = d.critical.stages.filter(st => st.idx != null).map(st => center(d, st.idx));
+      if (d.critical.sink_idx != null) pts.push(center(d, d.critical.sink_idx));
+      c.strokeStyle = css("--crit"); c.lineWidth = 2.6; c.lineJoin = "round";
+      c.beginPath(); pts.forEach(([x, y], k) => k ? c.lineTo(x, y) : c.moveTo(x, y)); c.stroke();
+      c.fillStyle = css("--crit");
+      pts.forEach(([x, y], k) => { c.beginPath(); c.arc(x, y, k === 0 || k === pts.length - 1 ? 5 : 2.6, 0, 7); c.fill(); });
+    }
+  }
+  function center(d, i) {
+    const s = cv.width / d.die[2];
+    return [X(d.cells.x[i]) + d.types[d.cells.t[i]].w * s / 2, Y(d.cells.y[i]) - d.row_h * s / 2];
+  }
+  function draw() {
+    if (!D) return;
+    if (!base || base.width !== cv.width || base.height !== cv.height) {
+      base = document.createElement("canvas"); base.width = cv.width; base.height = cv.height; render(base);
+    }
+    ctx.drawImage(base, 0, 0);
+    [S.hover, S.rowHi].forEach((i, k) => {
+      if (i < 0) return;
+      const d = des(), s = cv.width / d.die[2], w = d.types[d.cells.t[i]].w * s, h = d.row_h * s;
+      ctx.strokeStyle = k ? css("--crit") : css("--fg"); ctx.lineWidth = 2.5;
+      ctx.strokeRect(X(d.cells.x[i]) - 3, Y(d.cells.y[i]) - h - 3, w + 6, h + 6);
+    });
+  }
+
+  function hover(e) {
+    const d = des(), r = cv.getBoundingClientRect();
+    const ux = (e.clientX - r.left) / r.width * d.die[2], uy = (1 - (e.clientY - r.top) / r.height) * d.die[3];
+    const list = rowIndex.get(Math.floor((uy - d.core[1]) / d.row_h)) || [];
+    let lo = 0, hi = list.length - 1, hit = -1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1, i = list[m], x0 = d.cells.x[i];
+      if (ux < x0) hi = m - 1; else if (ux > x0 + d.types[d.cells.t[i]].w) lo = m + 1; else { hit = i; break; }
+    }
+    S.hover = hit; draw();
+    if (hit < 0) { $("#readout").innerHTML = "x " + ux.toFixed(1) + " µm, y " + uy.toFixed(1) + " µm: empty site"; return; }
+    const t = d.types[d.cells.t[hit]], k = d.critSet.get(hit);
+    $("#readout").innerHTML = "<b>" + d.groups[d.cells.g[hit]] + "</b> · <b>" + t.name + "</b> " + (t.ff ? "(flip-flop)" : "(logic)") +
+      " · " + t.w.toFixed(2) + " µm wide · at (" + d.cells.x[hit].toFixed(1) + ", " + d.cells.y[hit].toFixed(1) + ") µm" +
+      (k != null ? " · <b style=\"color:var(--crit)\">critical path stage " + (k + 1) + "</b>" : hit === d.critical.sink_idx ? " · <b style=\"color:var(--crit)\">captures the critical path</b>" : "");
+  }
+
+  function legend() {
+    const d = des(); let h = "";
+    if (S.color === "kind") h += '<span><i class="sw" style="background:' + css("--accent") + '"></i>Flip-flop</span><span><i class="sw" style="background:#5b7fb0"></i>Logic gate</span><span><i class="sw" style="background:#8a94a0"></i>Tie cell</span>';
+    else h += '<span>Color = block (' + (d.key === "systolic" ? "16 processing elements" : "4 lanes") + '); grey = shared logic</span>';
+    if ($("#ovCrit").checked) h += '<span><i class="sw" style="background:' + css("--crit") + '"></i>Critical path, big dots = launch and capture</span>';
+    if ($("#ovCong").checked) h += '<span><i class="sw" style="background:rgba(214,145,40,0.45)"></i>Routing &gt; 85% full</span><span><i class="sw" style="background:rgba(209,36,47,0.75)"></i>Over capacity</span>';
+    if ($("#ovIO").checked) h += "<span>● I/O pin</span>";
+    $("#legend").innerHTML = h;
+  }
+
+  function specs() {
+    const d = des(), r = d.report, v = r.verify, rt = r.route, t = r.sta_routed;
+    $("#specTitle").textContent = d.label;
+    const rows = [
+      ["Parameters", Object.entries(d.params).map(([k, x]) => k + "=" + x).join(" ")],
+      ["Standard cells", fmt(r.synth.cells)], ["Flip-flops", fmt(r.synth.flip_flops)],
+      ["Cell area", fmt(r.synth.area_um2) + " µm²"],
+      ["Verification", fmt(v.checked) + " outputs" + '<span class="pill ' + (v.mismatches === 0 ? "ok" : "warn") + '">' + (v.mismatches === 0 ? "0 mismatches" : v.mismatches + " mismatches") + "</span>"],
+      ["Core", r.place.core_um.map(x => fmt(x)).join(" × ") + " µm @ " + Math.round(r.place.utilization * 100) + "%"],
+      ["Clock target", d.clock_ns.toFixed(1) + " ns (" + fmt(1000 / d.clock_ns) + " MHz)"],
+      ["fmax after routing", fmt(t.fmax_mhz, 1) + " MHz" + '<span class="pill ' + (t.wns_ns >= 0 ? "ok" : "warn") + '">' + (t.wns_ns >= 0 ? "meets clock" : "fails clock") + "</span>"],
+      ["Worst slack (WNS)", (t.wns_ns >= 0 ? "+" : "") + t.wns_ns.toFixed(3) + " ns"],
+      ["Routed wirelength", fmt(rt.wirelength_um / 1000, 1) + " mm"],
+      ["Routing overflow", fmt(rt.overflow) + '<span class="pill ' + (rt.overflow ? "warn" : "ok") + '">' + (rt.overflow ? "congested" : "clean") + "</span>"],
+      ["Power", fmt(r.power.total_mw, 2) + " mW"],
+      ["Flow runtime", fmt(r.seconds, 1) + " s on 4 CPU cores"],
+    ];
+    $("#specs").innerHTML = rows.map(([k, x]) => "<dt>" + k + "</dt><dd>" + x + "</dd>").join("");
+  }
+
+  function table() {
+    const d = des(), st = d.critical.stages, max = Math.max(...st.map(s => s.incr_ns || 0));
+    let html = st.map((s, k) => {
+      const blk = s.idx != null ? d.groups[d.cells.g[s.idx]] : "primary input";
+      return '<tr data-idx="' + (s.idx ?? -1) + '"><td class="num">' + (k + 1) + "</td><td>" + blk + "</td><td>" + (s.cell || "input pin") +
+        "</td><td>" + (s.edge ? (s.edge === "r" ? "rise" : "fall") : "–") + '</td><td class="num">' + (s.incr_ns != null ? s.incr_ns.toFixed(3) : "–") +
+        '</td><td class="num">' + (s.wire_ns != null ? s.wire_ns.toFixed(4) : "–") + '</td><td class="num">' + s.arrival_ns.toFixed(3) +
+        '</td><td><span class="bar" style="width:' + Math.round(80 * (s.incr_ns || 0) / max) + 'px"></span></td></tr>';
+    }).join("");
+    const t = d.report.sta_routed;
+    html += '<tr data-idx="' + (d.critical.sink_idx ?? -1) + '"><td class="num">⏹</td><td colspan="5">Captured at ' + (d.critical.sink_idx != null ? d.groups[d.cells.g[d.critical.sink_idx]] + " flip-flop" : "output pin") +
+      '; slack ' + (t.wns_ns >= 0 ? "+" : "") + t.wns_ns.toFixed(3) + ' ns against a ' + d.clock_ns.toFixed(1) + ' ns clock</td><td class="num"></td><td></td></tr>';
+    const tb = $("#cpTable tbody");
+    tb.innerHTML = html;
+    tb.querySelectorAll("tr").forEach(tr => {
+      const on = () => { S.rowHi = +tr.dataset.idx; tb.querySelectorAll("tr").forEach(x => x.classList.toggle("on", x === tr)); draw(); };
+      tr.addEventListener("mouseenter", on); tr.addEventListener("click", on);
+    });
+    tb.addEventListener("mouseleave", () => { S.rowHi = -1; tb.querySelectorAll("tr").forEach(x => x.classList.remove("on")); draw(); });
+  }
+
+  function slack() {
+    const d = des(), v = d.slacks, bw = 0.05, W = 720, H = 240, L = 46, R = 12, T = 12, B = 40;
+    const lo = Math.floor(Math.min(0, v[0]) / bw) * bw, hi = Math.ceil(v[v.length - 1] / bw) * bw;
+    const n = Math.max(1, Math.round((hi - lo) / bw)), counts = new Array(n).fill(0);
+    v.forEach(s => counts[Math.min(n - 1, Math.floor((s - lo) / bw))]++);
+    const cmax = Math.max(...counts), X = s => L + (s - lo) / (hi - lo) * (W - L - R), Y = c => H - B - c / cmax * (H - T - B);
+    let h = "";
+    const step = Math.pow(10, Math.floor(Math.log10(cmax))) * (cmax / Math.pow(10, Math.floor(Math.log10(cmax))) > 5 ? 2 : 1);
+    for (let c = 0; c <= cmax; c += step) h += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(c) + '" y2="' + Y(c) + '" stroke="var(--line)"/><text x="' + (L - 6) + '" y="' + (Y(c) + 3) + '" text-anchor="end">' + c + "</text>";
+    counts.forEach((c, i) => { if (c) h += '<rect x="' + (X(lo + i * bw) + 0.5) + '" y="' + Y(c) + '" width="' + Math.max(1, X(lo + (i + 1) * bw) - X(lo + i * bw) - 1) + '" height="' + (H - B - Y(c)) + '" fill="' + (i === Math.min(n - 1, Math.floor((v[0] - lo) / bw)) ? "var(--crit)" : "var(--accent)") + '"><title>' + (lo + i * bw).toFixed(2) + "–" + (lo + (i + 1) * bw).toFixed(2) + " ns: " + c + " endpoints</title></rect>"; });
+    const tick = (hi - lo) > 1.5 ? 0.5 : 0.25;
+    for (let s = Math.ceil(lo / tick) * tick; s <= hi + 1e-9; s += tick) h += '<text x="' + X(s) + '" y="' + (H - B + 16) + '" text-anchor="middle">' + s.toFixed(2) + "</text>";
+    if (lo <= 0) h += '<line x1="' + X(0) + '" x2="' + X(0) + '" y1="' + T + '" y2="' + (H - B) + '" stroke="var(--fg)" stroke-dasharray="3 3"/>';
+    h += '<text x="' + ((L + W - R) / 2) + '" y="' + (H - 6) + '" text-anchor="middle">slack, ns (worst ' + d.critical.wns_ns.toFixed(3) + " ns · " + v.length + " endpoints)</text>";
+    $("#slack").innerHTML = h;
+  }
+
+  function steps() {
+    const d = des(), r = d.report;
+    const list = [
+      ["Synthesis", fmt(r.synth.cells) + " cells · " + fmt(r.synth.area_um2) + " µm²", "Yosys maps the Verilog onto Nangate45 standard cells and flattens the hierarchy."],
+      ["Verification", fmt(r.verify.checked) + " checks · " + r.verify.mismatches + " wrong", "A bit-parallel gate-level simulator runs 64 random tests per pass and compares every output with a Python reference model."],
+      ["Placement", "core " + r.place.core_um.map(x => fmt(x)).join(" × ") + " µm · HPWL " + fmt(r.place.hpwl_um / 1000, 1) + " mm", "Cells are pulled together by their wires and pushed apart like electric charges, then snapped into legal row sites."],
+      ["Timing", "fmax " + fmt(r.sta_placed.fmax_mhz, 1) + " MHz placed", "Static timing adds gate delays from the Liberty tables and wire delay estimated from placed distances."],
+      ["Routing", fmt(r.route.wirelength_um / 1000, 1) + " mm · overflow " + r.route.overflow, "Every connection gets a path on a 2.8 µm tile grid; congested tiles get more expensive until nets negotiate detours."],
+      ["Timing + power", "fmax " + fmt(r.sta_routed.fmax_mhz, 1) + " MHz · " + fmt(r.power.total_mw, 2) + " mW", "Timing is rerun on routed wire lengths; power uses the toggle rates measured in verification."],
+      ["Outputs", "DEF · layout SVG · report.json", "The placed design opens in KLayout or OpenROAD; this page is built from the same run."],
+    ];
+    $("#steps").innerHTML = list.map(([h, v, p]) => "<li><h3>" + h + '</h3><span class="v">' + v + "</span><p>" + p + "</p></li>").join("");
+  }
+})();
+</script>
