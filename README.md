@@ -22,6 +22,25 @@ Verilog ─► lint + synthesis ─► gate-level simulation ─► floorplan �
 | Power | back | Switching power from simulated toggle rates on routed net capacitance, clock power, Liberty leakage | `power.py` |
 | Outputs | back | DEF (opens in KLayout or OpenROAD), layout and congestion SVGs, JSON report | `layout.py` |
 
+## Demo
+
+[**chipflow layout explorer**](https://aabhimittal.github.io/chipflow/) is a static page in `demo/`
+built from a real run of both designs. It opens with a short guide (how to use it, how to read it,
+things to try), then:
+- **Layout:** the placed chip. Hover any cell to see its block, cell type and critical-path stage;
+  color by block or by flip-flop vs. logic; overlay the critical path, routing congestion and I/O pins.
+- **Critical path:** a gate-by-gate table that highlights each gate on the layout.
+- **Slack histogram:** the timing margin at every endpoint.
+- **Flow stages and source:** what each of the 7 stages produced, and the Verilog source.
+
+```bash
+python demo/build_data.py                  # rerun both designs, write demo/data.json (~35 s)
+python -m http.server -d demo 8000         # open http://localhost:8000
+```
+
+`.github/workflows/pages.yml` deploys it on pushes to `main` that touch `demo/`. Enable it once
+under *Settings → Pages → Source: GitHub Actions*.
+
 ## Quickstart
 
 ```bash

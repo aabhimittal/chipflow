@@ -88,3 +88,4 @@ def test_backend_is_legal_connected_and_timed(lib, sa2):
     for s0, s1 in zip(path, path[1:]):
         assert s1["arrival_ns"] == pytest.approx(s0["arrival_ns"] + s1["incr_ns"] + s1["wire_ns"], abs=2e-4)
     assert 0 < t["fmax_mhz"] < 2000
+    assert min(t["slack_by_endpoint"].values()) == t["wns_ns"]   # each endpoint keeps its worse edge

@@ -31,6 +31,7 @@ def _summary(t):
 
 
 def flow(a):
+    """Run every stage; returns (report, internals) so tools like demo/build_data.py can reuse them."""
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     log = print
@@ -96,7 +97,8 @@ def flow(a):
     rep["seconds"] = round(time.time() - t0, 1)
     (out / "report.json").write_text(json.dumps(_clean(rep), indent=1))
     log(f"      {out}/report.json, layout.svg, congestion.svg, placed.def, netlist.v  ({rep['seconds']} s)")
-    return rep
+    return rep, {"net": net, "lib": lib, "lef": lef, "pl": pl, "route": rt, "sta": t_rt, "params": params,
+                 "sources": sources}
 
 
 def main(argv=None):
@@ -119,7 +121,7 @@ def main(argv=None):
     else:
         if a.verilog and not a.top:
             p.error("--verilog needs --top")
-        flow(a)
+        flow(a)  # returns (report, internals); the CLI only needs the files it writes
 
 
 if __name__ == "__main__":
