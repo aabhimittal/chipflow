@@ -14,7 +14,8 @@ import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
-ORFS = "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/master/flow/platforms/nangate45"
+ORFS = ("https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/"
+        "f5504444e08f756336ed39935baafaaa98d45374/flow/platforms/nangate45")  # pinned commit
 FILES = {
     "NangateOpenCellLibrary_typical.lib": ("lib", "8d540a4d4cf6d09d27c87ad067857a9c0c2eeb023ab7a56e058cd3113db4e9b1"),
     "NangateOpenCellLibrary.tech.lef": ("lef", "834a79295054cd4209178d1bade67c353863c47bb4b3c22ee38b862b7cec37f2"),
