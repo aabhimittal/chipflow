@@ -4,7 +4,7 @@ import itertools
 import numpy as np
 import pytest
 
-from chipflow import designs, pdk, place, route, sim, sta, synth
+from chipflow import designs, pdk, place, route, sim, size, sta, synth
 from chipflow.pdk import Table
 from chipflow.sim import compile_function
 
@@ -89,3 +89,20 @@ def test_backend_is_legal_connected_and_timed(lib, sa2):
         assert s1["arrival_ns"] == pytest.approx(s0["arrival_ns"] + s1["incr_ns"] + s1["wire_ns"], abs=2e-4)
     assert 0 < t["fmax_mhz"] < 2000
     assert min(t["slack_by_endpoint"].values()) == t["wns_ns"]   # each endpoint keeps its worse edge
+    assert min(t["net_slack"].values()) == pytest.approx(t["wns_ns"], abs=5e-5)   # backward pass agrees (wns rounded to 1e-4)
+
+
+def test_timing_repair_upsizes_without_changing_logic(lib, tmp_path):
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", {"N": 2}, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    t = sta.analyze(net, lib, 1.5, pl, lef["macros"])
+    w = place.timing_weights(t, 1.5)
+    assert w and all(1.0 < v <= 5.0 for v in w.values()) and len(w) < net.n_nets
+    before = list(net.cells)
+    r = size.upsize(net, lib, lef, pl, 1.5)
+    assert r["cells_upsized"] > 0 and r["wns_after_ns"] > r["wns_before_ns"] and r["area_after_um2"] > r["area_before_um2"]
+    for (_, a), (_, b) in zip(before, net.cells):     # only drive strength changed, same family
+        assert a.rsplit("_X", 1)[0] == b.rsplit("_X", 1)[0]
+    res = designs.systolic_tb(sim.Simulator(net, lib), {"N": 2}, np.random.default_rng(0))
+    assert res["mismatches"] == 0                     # sized netlist still computes the same matmul

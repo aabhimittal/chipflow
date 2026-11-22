@@ -165,3 +165,13 @@ def route(net, lib, pl, lef, gcell_rows: float = 2.0, iters: int = 30, log=None)
             "cap_v": int(grid.cap_v.flat[0]), "iterations": len(hist),
             "max_util": round(float(max((grid.use_h / grid.cap_h).max(), (grid.use_v / grid.cap_v).max())), 3),
             "net_len": net_len, "grid_obj": grid, "conns": conns}
+
+
+def inflation(pl, grid, hot: float = 0.85, gain: float = 3.0, cap: float = 2.0) -> np.ndarray:
+    """Routability-driven placement: per-cell area factor for the density term, growing with the
+    routing utilization of the cell's gcell above `hot`, so re-placement spreads congested regions."""
+    from chipflow.layout import congestion_map
+    u = congestion_map(grid)
+    gx = np.clip(((pl.x + pl.w / 2) / grid.g).astype(int), 0, grid.nx - 1)
+    gy = np.clip(((pl.y + pl.h / 2) / grid.g).astype(int), 0, grid.ny - 1)
+    return np.clip(1 + gain * np.maximum(0, u[gy, gx] - hot), 1, cap)

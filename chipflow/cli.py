@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from chipflow import designs, layout, pdk, place, power, route, sim, sta, synth
+from chipflow import designs, layout, pdk, place, power, route, sim, size, sta, synth
 
 
 def _clean(o):
@@ -27,7 +27,7 @@ def _clean(o):
 
 
 def _summary(t):
-    return {k: v for k, v in t.items() if k not in ("critical_path", "slack_by_endpoint")}
+    return {k: v for k, v in t.items() if k not in ("critical_path", "slack_by_endpoint", "net_slack")}
 
 
 def flow(a):
@@ -74,16 +74,46 @@ def flow(a):
     log(f"      core {pl.stats['core_um']} um, HPWL {pl.stats['hpwl_um']:.0f} um, legalization moved {pl.stats['legal_disp_avg_um']} um avg")
 
     log("[4/7] timing after placement")
-    rep["sta_placed"] = _summary(sta.analyze(net, lib, a.clock_ns, pl, lef["macros"]))
+    t_pl = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"])
+    weights = None
+    if a.timing_driven:  # weight near-critical nets, re-place from the current solution
+        weights = place.timing_weights(t_pl, a.clock_ns)
+        log(f"      fmax {t_pl['fmax_mhz']} MHz; timing-driven re-placement weighting {len(weights)} nets")
+        pl = place.place(net, lib, lef, util=a.util, seed=a.seed, init=np.stack([pl.x + pl.w / 2, pl.y + pl.h / 2], 1), net_weight=weights)
+        t_pl = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"])
+        rep["place"] = {k: v for k, v in pl.stats.items() if k != "gp_hist"} | {"timing_driven_nets": len(weights)}
+    if a.size and t_pl["wns_ns"] < 0:
+        rep["sizing"] = size.upsize(net, lib, lef, pl, a.clock_ns, log=log)
+        log(f"      gate sizing: {rep['sizing']['cells_upsized']} cells upsized, WNS {rep['sizing']['wns_before_ns']:+.3f} -> {rep['sizing']['wns_after_ns']:+.3f} ns")
+        t_pl = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"])
+    rep["sta_placed"] = _summary(t_pl)
     log(f"      WNS {rep['sta_placed']['wns_ns']:+.3f} ns, fmax {rep['sta_placed']['fmax_mhz']} MHz")
 
     log("[5/7] global routing")
     rt = route.route(net, lib, pl, lef, log=log)
-    rep["route"] = {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
+    rounds = 0
+    while rt["overflow"] and rounds < a.routability_rounds:  # inflate congested cells, re-place, reroute
+        rounds += 1
+        f = route.inflation(pl, rt["grid_obj"])
+        log(f"      overflow {rt['overflow']}: routability round {rounds}, inflating {int((f > 1).sum())} cells and re-placing")
+        pl = place.place(net, lib, lef, util=a.util, seed=a.seed, init=np.stack([pl.x + pl.w / 2, pl.y + pl.h / 2], 1),
+                         inflate=f, net_weight=weights)
+        rt = route.route(net, lib, pl, lef)
+    if rounds:
+        rep["place"] = {k: v for k, v in pl.stats.items() if k != "gp_hist"} | {
+            k: rep["place"][k] for k in ("timing_driven_nets",) if k in rep["place"]}
+        rep["sta_placed"] = _summary(sta.analyze(net, lib, a.clock_ns, pl, lef["macros"]))
+    rep["route"] = {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")} | {"routability_rounds": rounds}
     log(f"      wirelength {rt['wirelength_um']:.0f} um, overflow {rt['overflow']}, peak edge use {rt['max_util']:.2f}")
 
     log("[6/7] timing + power after routing")
     t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
+    if a.size and t_rt["wns_ns"] < 0:  # post-route repair on routed lengths, then reroute the moved cells
+        rep["sizing_post_route"] = size.upsize(net, lib, lef, pl, a.clock_ns, log=log, net_len=rt["net_len"])
+        rt = route.route(net, lib, pl, lef)
+        rep["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
+        t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
+        log(f"      post-route sizing: {rep['sizing_post_route']['cells_upsized']} cells, rerouted overflow {rt['overflow']}")
     rep["sta_routed"] = _summary(t_rt)
     rep["critical_path"] = [{k: v for k, v in st.items() if k != "idx"} for st in t_rt["critical_path"]]
     rep["power"] = power.analyze(net, lib, L["voltage"], a.clock_ns, s.toggles, s.cycles, 64, rt["net_len"])
@@ -113,6 +143,9 @@ def main(argv=None):
     f.add_argument("--param", action="append", help="NAME=INT parameter override")
     f.add_argument("--clock-ns", type=float, default=2.0)
     f.add_argument("--util", type=float, default=0.6)
+    f.add_argument("--routability-rounds", type=int, default=2, help="re-place congested regions up to N times")
+    f.add_argument("--timing-driven", action=argparse.BooleanOptionalAction, default=True, help="re-place with critical nets weighted")
+    f.add_argument("--size", action=argparse.BooleanOptionalAction, default=True, help="upsize cells when timing fails")
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--out", default="runs/latest")
     a = p.parse_args(argv)
