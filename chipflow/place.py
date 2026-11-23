@@ -60,7 +60,7 @@ def floorplan(net, lef, util: float = 0.6, margin: float = 4.0):
 def _pin_arrays(net, lib, macros, io, max_degree):
     """Flatten every net's pins into (net index, movable cell or -1, offset/fixed x, y)."""
     drv, sinks = net.drivers_sinks(lib)
-    nid, cell, ox, oy = [], [], [], []
+    nid, cell, ox, oy, kept = [], [], [], [], []
     k = 0
     for n in range(net.n_nets):
         pins = ([drv[n]] if n in drv else []) + sinks[n]
@@ -75,16 +75,21 @@ def _pin_arrays(net, lib, macros, io, max_degree):
                 x, y = macros[net.cells[c][1]].pins.get(pin, (0.0, 0.0))
                 cell.append(c)
             nid.append(k); ox.append(x); oy.append(y)
+        kept.append(n)
         k += 1
-    return np.array(nid), np.array(cell), np.array(ox), np.array(oy), k
+    return np.array(nid), np.array(cell), np.array(ox), np.array(oy), k, kept
 
 
-def global_place(net, lib, lef, util=0.6, iters=1500, seed=0, max_degree=64, log=None, lam_growth=1.02):
+def global_place(net, lib, lef, util=0.6, iters=1500, seed=0, max_degree=64, log=None, lam_growth=1.02,
+                 init=None, inflate=None, net_weight=None):
     """lam_growth: density weight multiplier per iteration. On the 4x4 array, 1.02 gives 31% lower
-    HPWL than 1.05 for +1.6 s; 1.01 gains only 3% more at twice the iterations."""
+    HPWL than 1.05 for +1.6 s; 1.01 gains only 3% more at twice the iterations.
+    init: (m, 2) starting centers; inflate: per-cell area factor for the density term (routability);
+    net_weight: {net id: weight} on the wirelength term (timing-driven placement)."""
     macros = lef["macros"]
     core, die, w, h, io, area = floorplan(net, lef, util)
-    nid, cell, ox, oy, n_nets = _pin_arrays(net, lib, macros, io, max_degree)
+    nid, cell, ox, oy, n_nets, kept = _pin_arrays(net, lib, macros, io, max_degree)
+    nw = torch.tensor([(net_weight or {}).get(n, 1.0) for n in kept], dtype=torch.float64)
     m = len(net.cells)
     x0, y0, x1, y1 = core
     nb = int(min(128, max(16, 2 ** round(math.log2(math.sqrt(m) / 1.5)))))
@@ -92,13 +97,14 @@ def global_place(net, lib, lef, util=0.6, iters=1500, seed=0, max_degree=64, log
     g = torch.Generator().manual_seed(seed)
     cx = (x0 + x1) / 2 + (torch.rand(m, generator=g, dtype=torch.float64) - 0.5) * (x1 - x0) * 0.1
     cy = (y0 + y1) / 2 + (torch.rand(m, generator=g, dtype=torch.float64) - 0.5) * (y1 - y0) * 0.1
-    pos = torch.stack([cx, cy], 1).requires_grad_(True)
+    pos = (torch.tensor(init, dtype=torch.float64) if init is not None else torch.stack([cx, cy], 1)).requires_grad_(True)
     wt, ht = torch.tensor(w), torch.tensor(h)
     nid_t, mov = torch.tensor(nid), torch.tensor(cell >= 0)
     cidx = torch.tensor(np.where(cell >= 0, cell, 0))
     offx = torch.tensor(np.where(cell >= 0, ox - w[np.maximum(cell, 0)] / 2, ox))  # offsets from cell center
     offy = torch.tensor(np.where(cell >= 0, oy - h[np.maximum(cell, 0)] / 2, oy))
-    areas = wt * ht
+    areas = wt * ht * (torch.tensor(inflate) if inflate is not None else 1.0)
+    area = float(areas.sum())
     target = min(0.95, util + 0.1)
     ky = torch.fft.fftfreq(2 * nb, dtype=torch.float64)[:, None]
     kx = torch.fft.fftfreq(2 * nb, dtype=torch.float64)[None, :]
@@ -112,7 +118,7 @@ def global_place(net, lib, lef, util=0.6, iters=1500, seed=0, max_degree=64, log
             num = torch.zeros(n_nets, dtype=coord.dtype).index_add(0, nid_t, coord * e)
             den = torch.zeros(n_nets, dtype=coord.dtype).index_add(0, nid_t, e)
             return num / den
-        return (lse_mean(1.0) - lse_mean(-1.0)).sum()
+        return ((lse_mean(1.0) - lse_mean(-1.0)) * nw).sum()
 
     def density(p):
         fx = ((p[:, 0] - x0) / bw - 0.5).clamp(0, nb - 1 - 1e-9)
@@ -249,8 +255,9 @@ def hpwl(net, lib, pl: Placement, macros, max_degree=None) -> float:
     return total
 
 
-def place(net, lib, lef, util=0.6, seed=0, log=None) -> Placement:
-    core, die, w, h, io, centers, st = global_place(net, lib, lef, util, seed=seed, log=log)
+def place(net, lib, lef, util=0.6, seed=0, log=None, init=None, inflate=None, net_weight=None) -> Placement:
+    core, die, w, h, io, centers, st = global_place(net, lib, lef, util, seed=seed, log=log, init=init,
+                                                    inflate=inflate, net_weight=net_weight)
     x, y, flip = legalize(core, lef, w, h, centers)
     pl = Placement(core, die, lef["site"][1], lef["site"][0], x, y, flip, w, h, io, st)
     gx, gy = centers[:, 0] - w / 2, centers[:, 1] - h / 2
@@ -259,3 +266,12 @@ def place(net, lib, lef, util=0.6, seed=0, log=None) -> Placement:
     st["core_um"] = [round(core[2] - core[0], 2), round(core[3] - core[1], 2)]
     st["utilization"] = round(float((w * h).sum()) / ((core[2] - core[0]) * (core[3] - core[1])), 3)
     return pl
+
+
+def timing_weights(t, period_ns, alpha=4.0, frac=0.15) -> dict:
+    """Net weights for timing-driven placement: nets within `frac` of the period from the worst slack
+    get 1 + alpha * criticality^2. On both benchmarks alpha=4 adds ~3% fmax over an unweighted
+    second pass; alpha=8 adds a little more but grows SIMT wirelength 8% (congestion risk)."""
+    wns = t["wns_ns"]
+    thr = wns + frac * period_ns
+    return {n: 1 + alpha * min(1.0, (thr - s) / (thr - wns)) ** 2 for n, s in t["net_slack"].items() if s < thr}

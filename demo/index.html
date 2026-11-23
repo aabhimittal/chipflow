@@ -138,7 +138,7 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
         <h3>Try this</h3>
         <ul>
           <li><b>Structure survives.</b> Color the systolic array by block: its 16 processing elements land as 16 tiles in a rough 4×4 grid, though nothing told the placer about the grid. Wires between neighbors pulled them there.</li>
-          <li><b>Where GPUs hurt.</b> Turn on congestion for the SIMT core. The red tiles sit over the register-file read muxes; the systolic array has none.</li>
+          <li><b>Where GPUs hurt.</b> Turn on congestion for each design. The SIMT core runs 1,211 tiles above 85% of their tracks, against 374 on the systolic array, because its register-file read muxes fan wires in from everywhere. Its first routing attempt overflowed, so the flow inflated the cells in the hot tiles and re-placed them; one round was enough to route cleanly.</li>
           <li><b>Follow the slowest path.</b> On the systolic array, the red line stays inside one PE: flip-flop → signed multiplier → adder → accumulator, 28 gates. On SIMT it starts at the instruction input and runs through register-file muxes into the ALU.</li>
           <li><b>Count the memory.</b> Color the SIMT core by kind: 1,024 of its 1,088 flip-flops are register-file bits.</li>
         </ul>
@@ -401,9 +401,10 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
     const list = [
       ["Synthesis", fmt(r.synth.cells) + " cells · " + fmt(r.synth.area_um2) + " µm²", "Yosys maps the Verilog onto Nangate45 standard cells and flattens the hierarchy."],
       ["Verification", fmt(r.verify.checked) + " checks · " + r.verify.mismatches + " wrong", "A bit-parallel gate-level simulator runs 64 random tests per pass and compares every output with a Python reference model."],
-      ["Placement", "core " + r.place.core_um.map(x => fmt(x)).join(" × ") + " µm · HPWL " + fmt(r.place.hpwl_um / 1000, 1) + " mm", "Cells are pulled together by their wires and pushed apart like electric charges, then snapped into legal row sites."],
-      ["Timing", "fmax " + fmt(r.sta_placed.fmax_mhz, 1) + " MHz placed", "Static timing adds gate delays from the Liberty tables and wire delay estimated from placed distances."],
-      ["Routing", fmt(r.route.wirelength_um / 1000, 1) + " mm · overflow " + r.route.overflow, "Every connection gets a path on a 2.8 µm tile grid; congested tiles get more expensive until nets negotiate detours."],
+      ["Placement", "core " + r.place.core_um.map(x => fmt(x)).join(" × ") + " µm · HPWL " + fmt(r.place.hpwl_um / 1000, 1) + " mm" + (r.place.timing_driven_nets ? " · " + fmt(r.place.timing_driven_nets) + " timing-weighted nets" : ""),
+        "Cells are pulled together by their wires and pushed apart like electric charges, then snapped into legal row sites. A second pass weights the nets near the critical slack so their cells sit closer (timing-driven placement)."],
+      ["Timing", "fmax " + fmt(r.sta_placed.fmax_mhz, 1) + " MHz placed", "Static timing adds gate delays from the Liberty tables and wire delay from placed distances, then works backwards to give every net a slack. Gates on failing paths would be upsized (X1 → X2 → X4)."],
+      ["Routing", fmt(r.route.wirelength_um / 1000, 1) + " mm · overflow " + r.route.overflow + (r.route.routability_rounds ? " after " + r.route.routability_rounds + " re-placement round" : ""), "Every connection gets a path on a 2.8 µm tile grid; congested tiles get more expensive until nets negotiate detours. If some tiles stay over capacity, the cells there are inflated and re-placed."],
       ["Timing + power", "fmax " + fmt(r.sta_routed.fmax_mhz, 1) + " MHz · " + fmt(r.power.total_mw, 2) + " mW", "Timing is rerun on routed wire lengths; power uses the toggle rates measured in verification."],
       ["Outputs", "DEF · layout SVG · report.json", "The placed design opens in KLayout or OpenROAD; this page is built from the same run."],
     ];

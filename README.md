@@ -16,8 +16,9 @@ Verilog ─► lint + synthesis ─► gate-level simulation ─► floorplan �
 |---|---|---|---|
 | Synthesis | front | Yosys (YoWASP build, pip-installable) maps RTL onto Nangate45 cells; lint warnings are reported | `synth.py` |
 | Verification | front | Bit-parallel gate-level simulator: 64 independent test vectors per pass, cell behavior compiled from the Liberty `function` strings, compared with a Python golden model | `sim.py`, `designs.py` |
-| Floorplan + placement | back | Core sized for a target utilization; global placement minimizes weighted-average wirelength plus an electrostatic density energy (FFT Poisson solve); a gap-filling legalizer snaps cells to rows and sites | `place.py` |
-| Static timing | back | Rise/fall propagation with unateness through Liberty NLDM delay and slew tables; Elmore wire delay from placed or routed lengths; setup checks at flip-flops; critical path trace | `sta.py` |
+| Floorplan + placement | back | Core sized for a target utilization; global placement minimizes weighted-average wirelength plus an electrostatic density energy (FFT Poisson solve); a gap-filling legalizer snaps cells to rows and sites. **Timing-driven**: near-critical nets are weighted and the design re-placed. **Routability-driven**: cells in congested gcells are inflated and re-placed until routing overflow clears | `place.py` |
+| Static timing | back | Rise/fall propagation with unateness through Liberty NLDM delay and slew tables; Elmore wire delay from placed or routed lengths; setup checks at flip-flops; backward required-time pass for slack on every net; critical path trace | `sta.py` |
+| Timing repair | back | Gate sizing: worst-slack cells move up the library's drive strengths (X1 → X2 → X4…) in batches kept only if WNS improves; runs after placement and again on routed lengths | `size.py` |
 | Global routing | back | Gcell grid with track capacities from metal2–6 pitches; MST net decomposition; L-shape initial routes; negotiated rip-up and reroute (PathFinder) with A* | `route.py` |
 | Power | back | Switching power from simulated toggle rates on routed net capacitance, clock power, Liberty leakage | `power.py` |
 | Outputs | back | DEF (opens in KLayout or OpenROAD), layout and congestion SVGs, JSON report | `layout.py` |
@@ -62,12 +63,16 @@ python -m chipflow flow --verilog my.v --top my_top --clock-ns 2.0 --out runs/mi
 | Cell area | 16,573 µm² | 17,181 µm² |
 | Gate-level verification | 1,024 outputs, 0 mismatches | 50,944 lane outputs, 0 mismatches |
 | Core (60% utilization) | 166 × 167 µm | 169 × 169 µm |
-| Placed HPWL / routed wirelength | 111 mm / 125 mm | 103 mm / 161 mm |
-| Routing overflow | 0 | 10 (register-file muxes; see limits) |
-| fmax placed → routed | 567 → 564 MHz | 453 → 425 MHz |
-| Critical path | 28 stages, register → signed multiplier → adder → accumulator | 28 stages, register file read → multiply-add |
-| Power at the target clock | 4.11 mW | 4.35 mW |
-| Runtime, whole flow | 9 s | 21 s |
+| Placed HPWL / routed wirelength | 110 mm / 124 mm | 108 mm / 164 mm |
+| Routing overflow | 0 | 0 (after 1 routability round; was 10) |
+| fmax placed → routed, at 2.0 / 3.0 ns | 594 → **591 MHz** (was 564) | 468 → **440 MHz** (was 425) |
+| Tighter clock with sizing | 1.6 ns met after routing (626 MHz): 349 cells upsized, +1.7% area | 2.2 ns met after routing (455 MHz): 48 cells upsized post-route |
+| Critical path | 28 stages, register → signed multiplier → adder → accumulator | 26 stages, instruction → register-file read → ALU |
+| Power at the target clock | 4.09 mW | 4.35 mW |
+| Runtime, whole flow | 19 s | 27 s |
+
+Timing-driven placement was checked against a control: an unweighted second placement pass
+alone gains +1.2% (systolic) and +0.4% (SIMT) fmax; the net weights add about +3.5% and +2.9% on top.
 
 <p>
 <img src="docs/systolic_4x4_layout.png" width="49%" alt="Placed 4x4 systolic array: 16 processing-element tiles in distinct colors, critical path in red">
@@ -88,6 +93,10 @@ Red is the post-route critical path.
 - **A legalizer that could not backfill.** Tetris-style append-only rows failed on the SIMT
   core at 60% utilization, because a dense cluster near one edge exhausted the rows to its
   right. The legalizer now keeps each row's free intervals and fills the nearest gap.
+- **Routing that could not converge.** SIMT kept 10 overflowed edges however long the router
+  negotiated: 15 connections needed an edge with 14 tracks and every detour was full, so the
+  congestion just moved around. The fix belonged in placement: inflate cells in hot gcells and
+  re-place, which cleared it in one round.
 - **A placement schedule that quit too early.** Growing the density weight 5% per iteration
   spread cells before wirelength could organize them. 2% per iteration cut systolic HPWL by
   31% and more than doubled the post-placement slack.
@@ -96,21 +105,22 @@ Red is the post-route critical path.
 
 - **Not signoff.** Nangate45 is purposely non-manufacturable; there is no DRC, LVS or
   parasitic extraction, and timing uses one typical corner.
-- **Global routing only.** No track assignment or detailed routing. The SIMT core ends with
-  10 overflowed gcell edges: its 16:1 register-file read muxes need more tracks than 60%
-  utilization leaves; a lower `--util` or more router iterations clears it.
+- **Global routing only.** No track assignment or detailed routing. Overflow is now cleared by
+  routability-driven re-placement (SIMT needed one round), at a cost of a few percent fmax.
 - **Ideal clock.** No clock-tree synthesis, so no skew and no hold analysis.
-- **No timing repair yet.** No gate sizing or buffering; high-fanout nets (clock, clear) are
-  excluded from placement wirelength.
-- **Power is a lower bound.** Cell internal power (Liberty `internal_power` tables) is not
-  modeled.
+- **Sizing only.** Timing repair upsizes cells; there is no buffer insertion, so high-fanout nets
+  (clock, clear) stay unbuffered and are excluded from placement wirelength.
+- **Power is a lower bound.** Cell internal power is not modeled. Nangate45 does not declare the
+  unit of its `internal_power` tables, and the two Liberty readings (V²·fF = fJ, or V·mA·ns = pJ)
+  differ 1000×; neither matches a 45 nm gate cleanly, so this waits for a calibration against a
+  reference tool.
 - **Single-threaded Python** for the router, STA and legalizer; placement uses PyTorch on CPU.
 
 ## Roadmap
 
-1. Timing-driven placement: make the STA differentiable and feed slack gradients to placement.
-2. Gate sizing and buffering against the Liberty drive strengths (X1/X2/X4).
-3. Clock-tree synthesis and hold analysis.
+1. Clock-tree synthesis and hold analysis.
+2. Buffer insertion for high-fanout and long nets.
+3. Differentiable STA: slack gradients straight into placement, replacing net weights.
 4. Track assignment, then detailed routing.
 5. GPU kernels for placement density, STA propagation and routing cost updates, for designs
    above 100k cells.

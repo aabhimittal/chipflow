@@ -65,7 +65,8 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None) -> d
         a, s, _ = at[n][t]
         return a + wire.get((n, p), 0.0), s
 
-    for c in comb_order(net, lib):
+    order = comb_order(net, lib)
+    for c in order:
         inst, typ = net.cells[c]
         cell = lib[typ]
         for p in cell.outputs():
@@ -110,6 +111,32 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None) -> d
                         a, _ = sink_arrival(n, ("port", name, b), t)
                         ends.append((period_ns - a, f"{name}[{b}]", n, t, ("port", name, b)))
     ends.sort(key=lambda e: e[0])
+    # backward pass: required times with the same delays as the forward pass -> slack on every net
+    INF = float("inf")
+    req = {n: {t: INF for t in RF} for n in at}
+    for sl, _, n, t, _ in ends:
+        req[n][t] = min(req[n][t], sl + at[n][t][0])
+    for c in reversed(order):
+        cell = lib[net.cells[c][1]]
+        for p in cell.outputs():
+            n = net.pins[c].get(p.name)
+            if n is None:
+                continue
+            for arc in p.arcs:
+                if not arc.kind.startswith("combinational") or arc.related not in net.pins[c]:
+                    continue
+                n_in = net.pins[c][arc.related]
+                for t_out in RF:
+                    tab = "rise" if t_out == "r" else "fall"
+                    if f"cell_{tab}" not in arc.tables or req[n][t_out] == INF:
+                        continue
+                    ins = {"positive_unate": [t_out], "negative_unate": ["f" if t_out == "r" else "r"]}.get(arc.sense, list(RF))
+                    for t_in in ins:
+                        dly = arc.tables[f"cell_{tab}"](at[n_in][t_in][1], load[n])
+                        r_in = req[n][t_out] - dly - wire.get((n_in, (c, arc.related)), 0.0)
+                        if r_in < req[n_in][t_in]:
+                            req[n_in][t_in] = r_in
+    net_slack = {n: min(req[n][t] - at[n][t][0] for t in RF) for n in at if min(req[n].values()) < INF}
     wns = ends[0][0] if ends else 0.0
     path = _trace(net, at, wire, ends[0]) if ends else []
     worst_per_endpoint = {}
@@ -120,7 +147,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None) -> d
             "fmax_mhz": round(1000.0 / (period_ns - wns), 1) if period_ns - wns > 0 else None,
             "critical_endpoint": ends[0][1] if ends else None, "critical_path": path,
             "critical_sink_idx": ends[0][4][0] if ends and ends[0][4][0] != "port" else None,
-            "slack_by_endpoint": worst_per_endpoint}
+            "slack_by_endpoint": worst_per_endpoint, "net_slack": net_slack}
 
 
 def _trace(net, at, wire, end):
