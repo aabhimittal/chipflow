@@ -26,7 +26,7 @@ def upsize(net, lib, lef, pl, period_ns, max_rounds=40, log=None, net_len=None) 
     """net_len: routed lengths for post-route sizing (else placed HPWL estimates)."""
     macros = lef["macros"]
     area = lambda: float(sum(lib[t].area for _, t in net.cells))
-    t = sta.analyze(net, lib, period_ns, pl, macros, net_len)
+    t = sta.analyze(net, lib, period_ns, pl, macros, net_len, hold=False)
     start = {"wns_ns": t["wns_ns"], "area_um2": round(area(), 1)}
     changed, batch_frac, rounds = set(), 0.25, 0
     while rounds < max_rounds and t["wns_ns"] < 0:
@@ -47,7 +47,7 @@ def upsize(net, lib, lef, pl, period_ns, max_rounds=40, log=None, net_len=None) 
             inst, typ = net.cells[c]
             net.cells[c] = (inst, _bigger(lib, typ))
             pl.w[c] = macros[net.cells[c][1]].width
-        t2 = sta.analyze(net, lib, period_ns, pl, macros, net_len)
+        t2 = sta.analyze(net, lib, period_ns, pl, macros, net_len, hold=False)
         if t2["wns_ns"] > t["wns_ns"] + 1e-4:
             t = t2
             changed.update(batch)
@@ -62,6 +62,6 @@ def upsize(net, lib, lef, pl, period_ns, max_rounds=40, log=None, net_len=None) 
             batch_frac /= 2
     centers = np.stack([pl.x + pl.w / 2, pl.y + pl.h / 2], 1)
     pl.x, pl.y, pl.flip = place.legalize(pl.core, lef, pl.w, pl.h, centers)
-    final = sta.analyze(net, lib, period_ns, pl, macros, net_len)
+    final = sta.analyze(net, lib, period_ns, pl, macros, net_len, hold=False)
     return {"rounds": rounds, "cells_upsized": len(changed), "wns_before_ns": start["wns_ns"],
             "wns_after_ns": final["wns_ns"], "area_before_um2": start["area_um2"], "area_after_um2": round(area(), 1)}

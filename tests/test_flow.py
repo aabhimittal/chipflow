@@ -106,3 +106,30 @@ def test_timing_repair_upsizes_without_changing_logic(lib, tmp_path):
         assert a.rsplit("_X", 1)[0] == b.rsplit("_X", 1)[0]
     res = designs.systolic_tb(sim.Simulator(net, lib), {"N": 2}, np.random.default_rng(0))
     assert res["mismatches"] == 0                     # sized netlist still computes the same matmul
+
+
+def test_clock_tree_buffering_and_hold_fix(lib, tmp_path):
+    from chipflow import buffer
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", {"N": 2}, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    buffer.cts(net, lib, lef, pl)
+    r = buffer.repair_design(net, lib, lef, pl, 2.0)
+    t = sta.analyze(net, lib, 2.0, pl, lef["macros"])
+    assert t["clock"]["propagated"] and t["clock"]["skew_ns"] < 0.05 and t["hold_failing"] == 0
+    assert r["violations_after"] == {"slew": 0, "cap": 0}
+    _, sinks = net.drivers_sinks(lib)
+    assert max(len(s) for n, s in sinks.items() if n not in {k for p in net.ports.values() for k in p[1]}) <= 16
+    c = min(t["hold_by_ff"], key=t["hold_by_ff"].get)   # skew the tightest flip-flop late: 9 x ~25 ps beats ~+0.13 ns of hold slack
+    ck = lib[net.cells[c][1]].ff["clock"]
+    for k in range(9):
+        out = buffer._new_net(net)
+        x, y = pl.pin_xy(c, ck, lef["macros"], net.cells[c][1])
+        buffer._add_cell(net, pl, lef, f"skew_{k}", "CLKBUF_X1", {"A": net.pins[c][ck], "Z": out}, x, y)
+        net.pins[c][ck] = out
+    buffer._legalize(pl, lef)
+    assert sta.analyze(net, lib, 2.0, pl, lef["macros"])["hold_failing"] >= 1
+    h = buffer.fix_hold(net, lib, lef, pl, 2.0)
+    assert h["buffers"] > 0 and h["hold_failing"] == 0 and h["whs_after_ns"] >= 0
+    res = designs.systolic_tb(sim.Simulator(net, lib), {"N": 2}, np.random.default_rng(0))
+    assert res["mismatches"] == 0                     # clock tree, buffers and delay cells keep the logic

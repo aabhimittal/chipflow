@@ -7,11 +7,12 @@ gate-level simulator (the clock net: 2 per cycle). Cell internal power is not mo
 from __future__ import annotations
 
 from chipflow import pdk
+from chipflow.sta import clock_network
 
 
 def analyze(net, lib, voltage, period_ns, toggles, cycles, lanes, net_len=None) -> dict:
     _, sinks = net.drivers_sinks(lib)
-    clock_nets = {net.pins[c][lib[t].ff["clock"]] for c, (_, t) in enumerate(net.cells) if lib[t].ff}
+    clock_nets = clock_network(net, lib)[1]   # the whole clock tree switches twice a cycle
     f_hz = 1e9 / period_ns
     sw = clk = 0.0
     for n in range(net.n_nets):
