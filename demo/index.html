@@ -107,7 +107,7 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
     <h1>From Verilog to layout</h1>
     <p class="lede">Two building blocks of AI accelerators, a TPU-style systolic array and a GPU-style SIMT core, taken through every step of a chip flow: synthesis, gate-level verification, placement, timing, routing and power. Everything on this page is real output of the flow.</p>
     <ol class="flow" aria-label="Flow stages">
-      <li>Synthesis</li><li>Verification</li><li>Placement</li><li>Timing</li><li>Routing</li><li>Timing + power</li><li>DEF + reports</li>
+      <li>Synthesis</li><li>Verification</li><li>Placement</li><li>Clock tree + buffers</li><li>Timing</li><li>Routing</li><li>Timing + power</li><li>DEF + reports</li>
     </ol>
   </header>
 
@@ -138,8 +138,8 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
         <h3>Try this</h3>
         <ul>
           <li><b>Structure survives.</b> Color the systolic array by block: its 16 processing elements land as 16 tiles in a rough 4×4 grid, though nothing told the placer about the grid. Wires between neighbors pulled them there.</li>
-          <li><b>Where GPUs hurt.</b> Turn on congestion for each design. The SIMT core runs 1,211 tiles above 85% of their tracks, against 374 on the systolic array, because its register-file read muxes fan wires in from everywhere. Its first routing attempt overflowed, so the flow inflated the cells in the hot tiles and re-placed them; one round was enough to route cleanly.</li>
-          <li><b>Follow the slowest path.</b> On the systolic array, the red line stays inside one PE: flip-flop → signed multiplier → adder → accumulator, 28 gates. On SIMT it starts at the instruction input and runs through register-file muxes into the ALU.</li>
+          <li><b>Where GPUs hurt.</b> Turn on congestion for each design. The SIMT core runs 1,388 tiles above 85% of their tracks, against 459 on the systolic array, because its register-file read muxes fan wires in from everywhere. Its first routing attempt overflowed, so the flow inflated the cells in the hot tiles and re-placed them; one round was enough to route cleanly.</li>
+          <li><b>Follow the slowest path.</b> On the systolic array, the red line stays inside one PE: flip-flop → signed multiplier → adder → accumulator, 29 gates. On SIMT it starts at the instruction input and runs through register-file muxes into the ALU.</li>
           <li><b>Count the memory.</b> Color the SIMT core by kind: 1,024 of its 1,088 flip-flops are register-file bits.</li>
         </ul>
       </div>
@@ -343,13 +343,15 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
     $("#specTitle").textContent = d.label;
     const rows = [
       ["Parameters", Object.entries(d.params).map(([k, x]) => k + "=" + x).join(" ")],
-      ["Standard cells", fmt(r.synth.cells)], ["Flip-flops", fmt(r.synth.flip_flops)],
+      ["Standard cells", fmt(r.synth.cells) + (r.cts || r.repair ? " + " + fmt(d.cells.x.length - r.synth.cells) + " buffers" : "")], ["Flip-flops", fmt(r.synth.flip_flops)],
       ["Cell area", fmt(r.synth.area_um2) + " µm²"],
       ["Verification", fmt(v.checked) + " outputs" + '<span class="pill ' + (v.mismatches === 0 ? "ok" : "warn") + '">' + (v.mismatches === 0 ? "0 mismatches" : v.mismatches + " mismatches") + "</span>"],
       ["Core", r.place.core_um.map(x => fmt(x)).join(" × ") + " µm @ " + Math.round(r.place.utilization * 100) + "%"],
       ["Clock target", d.clock_ns.toFixed(1) + " ns (" + fmt(1000 / d.clock_ns) + " MHz)"],
       ["fmax after routing", fmt(t.fmax_mhz, 1) + " MHz" + '<span class="pill ' + (t.wns_ns >= 0 ? "ok" : "warn") + '">' + (t.wns_ns >= 0 ? "meets clock" : "fails clock") + "</span>"],
       ["Worst slack (WNS)", (t.wns_ns >= 0 ? "+" : "") + t.wns_ns.toFixed(3) + " ns"],
+      ["Clock skew", t.clock && t.clock.propagated ? fmt(t.clock.skew_ns * 1000) + " ps over " + fmt(t.clock.buffers) + " clock buffers" : "ideal clock"],
+      ["Hold (worst slack)", t.whs_ns == null ? "–" : (t.whs_ns >= 0 ? "+" : "") + t.whs_ns.toFixed(3) + " ns" + '<span class="pill ' + (t.hold_failing ? "warn" : "ok") + '">' + (t.hold_failing ? t.hold_failing + " failing" : "met") + "</span>"],
       ["Routed wirelength", fmt(rt.wirelength_um / 1000, 1) + " mm"],
       ["Routing overflow", fmt(rt.overflow) + '<span class="pill ' + (rt.overflow ? "warn" : "ok") + '">' + (rt.overflow ? "congested" : "clean") + "</span>"],
       ["Power", fmt(r.power.total_mw, 2) + " mW"],
@@ -403,7 +405,9 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
       ["Verification", fmt(r.verify.checked) + " checks · " + r.verify.mismatches + " wrong", "A bit-parallel gate-level simulator runs 64 random tests per pass and compares every output with a Python reference model."],
       ["Placement", "core " + r.place.core_um.map(x => fmt(x)).join(" × ") + " µm · HPWL " + fmt(r.place.hpwl_um / 1000, 1) + " mm" + (r.place.timing_driven_nets ? " · " + fmt(r.place.timing_driven_nets) + " timing-weighted nets" : ""),
         "Cells are pulled together by their wires and pushed apart like electric charges, then snapped into legal row sites. A second pass weights the nets near the critical slack so their cells sit closer (timing-driven placement)."],
-      ["Timing", "fmax " + fmt(r.sta_placed.fmax_mhz, 1) + " MHz placed", "Static timing adds gate delays from the Liberty tables and wire delay from placed distances, then works backwards to give every net a slack. Gates on failing paths would be upsized (X1 → X2 → X4)."],
+      ["Clock tree + buffers", r.cts ? fmt(r.cts.buffers) + " clock buffers · " + fmt(r.repair.buffers) + " repair buffers" : "–",
+        "The clock fans out to every flip-flop through a balanced tree of clock buffers. Nets driving more than 16 pins get buffer trees, and drivers still too weak for their load are upsized. The netlist is then re-simulated to prove the logic did not change" + (r.verify_backend ? " (" + r.verify_backend.mismatches + " mismatches)." : ".")],
+      ["Timing", "fmax " + fmt(r.sta_placed.fmax_mhz, 1) + " MHz placed", "Static timing adds gate delays from the Liberty tables and wire delay from placed distances, with each flip-flop's own clock arrival from the tree. It checks setup on the slowest paths and hold on the fastest, then works backwards to give every net a slack. Gates on failing paths get upsized (X1 → X2 → X4)."],
       ["Routing", fmt(r.route.wirelength_um / 1000, 1) + " mm · overflow " + r.route.overflow + (r.route.routability_rounds ? " after " + r.route.routability_rounds + " re-placement round" : ""), "Every connection gets a path on a 2.8 µm tile grid; congested tiles get more expensive until nets negotiate detours. If some tiles stay over capacity, the cells there are inflated and re-placed."],
       ["Timing + power", "fmax " + fmt(r.sta_routed.fmax_mhz, 1) + " MHz · " + fmt(r.power.total_mw, 2) + " mW", "Timing is rerun on routed wire lengths; power uses the toggle rates measured in verification."],
       ["Outputs", "DEF · layout SVG · report.json", "The placed design opens in KLayout or OpenROAD; this page is built from the same run."],

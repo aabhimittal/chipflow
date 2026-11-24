@@ -148,6 +148,7 @@ class Pin:
     function: str | None = None
     clock: bool = False
     arcs: list = dc.field(default_factory=list)
+    max_cap: float = float("inf")
 
 
 @dc.dataclass
@@ -193,7 +194,8 @@ def load_liberty(path: str | None = None) -> dict:
         pins = {}
         for p in c.sub("pin"):
             pin = Pin(p.args[0], p.attrs.get("direction", "input"), float(p.attrs.get("capacitance", 0.0)),
-                      p.attrs.get("function"), p.attrs.get("clock") == "true")
+                      p.attrs.get("function"), p.attrs.get("clock") == "true",
+                      max_cap=float(p.attrs.get("max_capacitance", "inf")))
             for t in p.sub("timing"):
                 tabs = {g.kind: _table(g, templates) for g in t.groups
                         if g.kind in ("cell_rise", "cell_fall", "rise_transition", "fall_transition",
