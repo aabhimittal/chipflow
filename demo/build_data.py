@@ -21,7 +21,7 @@ r2 = lambda v: round(float(v), 2)
 
 def export(key: str, spec: dict) -> dict:
     a = argparse.Namespace(design=key, verilog=None, top=None, param=None, clock_ns=spec["clock_ns"],
-                           util=0.6, seed=0, routability_rounds=2, timing_driven=True, size=True, cts=True, buffer=True, out=str(ROOT / "runs" / f"demo_{key}"))
+                           util=0.6, seed=0, routability_rounds=2, timing_driven=True, size=True, cts=True, buffer=True, io=True, io_budget=0.3, input_driver="BUF_X4", output_load=4.0, out=str(ROOT / "runs" / f"demo_{key}"))
     rep, ctx = cli.flow(a)
     net, lib, pl, rt, t = ctx["net"], ctx["lib"], ctx["pl"], ctx["route"], ctx["sta"]
     types = sorted({typ for _, typ in net.cells})
@@ -51,7 +51,7 @@ def export(key: str, spec: dict) -> dict:
                      "stages": [{k: (v if not isinstance(v, (np.generic,)) else v.item()) for k, v in st.items()}
                                 for st in t["critical_path"]]},
         "slacks": [round(float(s), 3) for s in np.sort(slacks)],
-        "report": {k: rep[k] for k in ("synth", "verify", "verify_backend", "place", "cts", "repair", "sizing", "hold_fix", "sta_placed", "sta_routed", "route", "power", "seconds") if k in rep},
+        "report": {k: rep[k] for k in ("io", "synth", "verify", "verify_backend", "place", "cts", "repair", "sizing", "hold_fix", "sta_placed", "sta_routed", "route", "power", "seconds") if k in rep},
         "verilog": Path(ctx["sources"][0]).read_text(),
     }
 

@@ -54,10 +54,12 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
             return 0.0, 0.0
         return pl.io[(p[1], p[2])] if p[0] == "port" else pl.pin_xy(p[0], p[1], macros, net.cells[p[0]][1])
 
+    io = net.io
+    out_load = io["output_load"] if io else OUT_LOAD_FF
     load, wire = {}, {}
     for n in range(net.n_nets):
         pins = sinks[n]
-        cpin = sum(OUT_LOAD_FF if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap for p in pins)
+        cpin = sum(out_load if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap for p in pins)
         if pl is not None and n in drv and pins:
             pts = [xy(drv[n])] + [xy(p) for p in pins]
             length = net_len.get(n) if net_len and n in net_len else (
@@ -65,13 +67,14 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
             dx0, dy0 = pts[0]
             for p, (sx, sy) in zip(pins, pts[1:]):
                 d = abs(sx - dx0) + abs(sy - dy0)
-                cp = OUT_LOAD_FF if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap
+                cp = out_load if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap
                 wire[(n, p)] = r_um * d * (c_um * d / 2 + cp) * 1e-6  # ohm*fF = 1e-6 ns
         else:
             length = 0.0
         load[n] = cpin + c_um * length
 
     clk_cells, clk_nets, clk_roots = clock_network(net, lib, drv)
+    drv_arc = next(a for p in lib[io["driver"]].outputs() for a in p.arcs if a.kind.startswith("combinational")) if io else None
     propagated = bool(clk_cells)
     order = comb_order(net, lib)
     ffs = [c for c, (_, t) in enumerate(net.cells) if lib[t].ff]
@@ -80,10 +83,14 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
         at = {}
         better = (lambda a, b: a < b) if early else (lambda a, b: a > b)
         for name, (d, nets) in net.ports.items():
-            if d == "input":
-                arr = NEVER if early and name not in clk_roots else 0.0   # hold: register to register only
-                for n in nets:
-                    at[n] = {t: (arr, IN_SLEW, None) for t in RF}
+            if d != "input":
+                continue
+            for n in nets:
+                if io and name not in clk_roots:   # constrained input: input delay + driving cell into the net
+                    at[n] = {t: (io["input_delay"] + drv_arc.tables[f"cell_{'rise' if t == 'r' else 'fall'}"](IN_SLEW, load[n]),
+                                 drv_arc.tables[f"{'rise' if t == 'r' else 'fall'}_transition"](IN_SLEW, load[n]), None) for t in RF}
+                else:  # unconstrained: ideal driver at time 0; left out of hold (register to register only)
+                    at[n] = {t: (NEVER if early and name not in clk_roots else 0.0, IN_SLEW, None) for t in RF}
         for n in net.const:
             at[n] = {t: (NEVER if early else 0.0, IN_SLEW, None) for t in RF}
 
@@ -158,7 +165,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
                 if n in at:
                     for t in RF:
                         a, _ = sink_arrival(n, ("port", name, b), t)
-                        ends.append((period_ns - a, f"{name}[{b}]", n, t, ("port", name, b)))
+                        ends.append((period_ns - (io["output_delay"] if io else 0.0) - a, f"{name}[{b}]", n, t, ("port", name, b)))
     ends.sort(key=lambda e: e[0])
 
     # backward pass: required times with the same delays as the forward pass -> slack on every net
@@ -213,8 +220,12 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
     for n, d in drv.items():
         if d[0] != "port":
             mc = lib[net.cells[d[0]][1]].pins[d[1]].max_cap
-            if load[n] > mc:
-                drv_cap[n] = load[n]
+        elif io and d[1] not in clk_roots:
+            mc = next(p.max_cap for p in lib[io["driver"]].outputs())
+        else:
+            continue
+        if load[n] > mc:
+            drv_cap[n] = load[n]
     slow = {n for n, v in at.items() if n not in net.const and max(v[t][1] for t in RF) > MAX_SLEW}
     lats = [lat[c][0] for c in ffs]
 

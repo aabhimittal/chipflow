@@ -18,6 +18,7 @@ Verilog ─► lint + synthesis ─► gate-level simulation ─► floorplan �
 | Verification | front | Bit-parallel gate-level simulator: 64 independent test vectors per pass, cell behavior compiled from the Liberty `function` strings, compared with a Python golden model | `sim.py`, `designs.py` |
 | Floorplan + placement | back | Core sized for a target utilization; global placement minimizes weighted-average wirelength plus an electrostatic density energy (FFT Poisson solve); a gap-filling legalizer snaps cells to rows and sites. **Timing-driven**: near-critical nets are weighted and the design re-placed. **Routability-driven**: cells in congested gcells are inflated and re-placed until routing overflow clears | `place.py` |
 | Static timing | back | Rise/fall propagation with unateness through Liberty NLDM delay and slew tables; Elmore wire delay from placed or routed lengths; propagated clock through the clock tree (latency and skew per flip-flop); setup on latest arrivals, hold on earliest (register to register); slew and capacitance limit checks; backward required-time pass for slack on every net; critical path trace | `sta.py` |
+| I/O constraints | back | SDC-style budget on the netlist: each input port arrives at `io-budget` × period through a `BUF_X4` driving cell; outputs must be ready `io-budget` × period before the edge into a 4 fF load. Port paths are then timed for setup and hold and port nets are buffered like internal ones | `sta.py`, `cli.py` |
 | Clock tree + buffers | back | Clock-tree synthesis: each clock's flip-flops are split by recursive median bisection into groups of ≤ 16 under a `CLKBUF_X3`, level by level up to the clock pin. Design-rule repair: nets driving > 16 pins get a `BUF_X4` tree, then drivers still over the slew or capacitance limit are upsized. Hold fixing: `BUF_X1` delay cells in front of flip-flops whose data arrives too early, where setup slack allows | `buffer.py` |
 | Timing repair | back | Gate sizing: worst-slack cells move up the library's drive strengths (X1 → X2 → X4…) in batches kept only if WNS improves; runs after buffering and again on routed lengths | `size.py` |
 | Global routing | back | Gcell grid with track capacities from metal2–6 pitches; MST net decomposition; L-shape initial routes; negotiated rip-up and reroute (PathFinder) with A* | `route.py` |
@@ -60,19 +61,24 @@ python -m chipflow flow --verilog my.v --top my_top --clock-ns 2.0 --out runs/mi
 
 | | 4×4 systolic array (INT8 MAC, 24-bit acc) | SIMT slice (4 lanes, 2 warps, 16-bit) |
 |---|---|---|
-| Cells / flip-flops | 12,736 / 640 | 11,094 / 1,088 |
-| Cell area | 16,573 µm² | 17,181 µm² |
-| Gate-level verification | 1,024 outputs, 0 mismatches | 50,944 lane outputs, 0 mismatches |
+| Cells / flip-flops (with input registers) | 12,800 / 704 | 11,065 / 1,110 |
+| Cell area | 16,862 µm² | 17,235 µm² |
+| Gate-level verification, before and after back-end edits | 1,024 outputs, 0 mismatches | 50,688 lane outputs, 0 mismatches |
 | Core (60% utilization) | 166 × 167 µm | 169 × 169 µm |
-| Clock tree | 68 `CLKBUF_X3`, latency 132–148 ps, **skew 16 ps** | 136 `CLKBUF_X3`, latency 104–132 ps, **skew 27 ps** |
-| Design-rule repair | 92 nets buffered (184 `BUF_X4`); slew/cap violations 16/64 → **0/0** | 223 nets buffered (553 `BUF_X4`), 75 drivers upsized; 121/229 → **0/0** |
-| Routed wirelength / overflow | 129 mm / 0 | 182 mm / 0 (after 1 routability round) |
-| Routed fmax at 2.0 / 3.0 ns | **651 MHz** (591 before buffering, 564 before M1) | **587 MHz** (440 before buffering, 425 before M1) |
-| Hold, worst slack | +0.134 ns, no delay buffers needed | +0.115 ns, none needed |
-| Tightest clock met after routing | **1.4 ns (716 MHz)**: 1,002 cells upsized | **1.8 ns (585 MHz)** |
-| Critical path | 29 stages, register → signed multiplier → adder → accumulator | 30 stages, instruction → register-file read → ALU |
-| Power at the target clock | 4.35 mW (clock tree 0.72 mW) | 4.87 mW (clock tree 0.78 mW) |
-| Runtime, whole flow | 18 s | 51 s |
+| I/O budget | 30% of the cycle each side, `BUF_X4` input drivers | same |
+| Clock tree | 68 `CLKBUF_X3`, **skew 19 ps** | 136 `CLKBUF_X3`, **skew 27 ps** |
+| Design-rule repair | 97 nets buffered (208 `BUF_X4`); slew/cap violations 17/65 → **0/0** | 235 nets buffered (814 `BUF_X4`, including the instruction ports), 67 drivers upsized; 614/234 → **0/0** |
+| Routed fmax at 2.0 / 3.0 ns | **645 MHz** | **503 MHz** |
+| Hold, worst slack | +0.133 ns, no delay buffers needed | +0.115 ns, none needed |
+| Tightest clock met after routing | **1.4 ns (715 MHz)**: 1,100 cells upsized | **1.9 ns (528 MHz)** |
+| Critical path | 29 stages, register → signed multiplier → adder → accumulator | 33 stages, issue register → buffer trees → decode → register-file read → ALU |
+| Power at the target clock | 4.18 mW | 5.00 mW |
+| Runtime, whole flow | 20 s | 52 s |
+
+Before I/O constraints the ports were ideal (arrival 0, infinite drive), which reported 651 / 587 MHz.
+The systolic array loses only 1% once its inputs are registered. SIMT's 587 MHz relied on
+instructions reaching ~600 loads instantly; driven by a real cell through a registered issue stage
+it runs at 503 MHz.
 
 Timing-driven placement was checked against a control: an unweighted second placement pass
 alone gains +1.2% (systolic) and +0.4% (SIMT) fmax; the net weights add about +3.5% and +2.9% on top.
@@ -96,6 +102,16 @@ Red is the post-route critical path.
 - **A legalizer that could not backfill.** Tetris-style append-only rows failed on the SIMT
   core at 60% utilization, because a dense cluster near one edge exhausted the rows to its
   right. The legalizer now keeps each row's free intervals and fills the nearest gap.
+- **Constraints exposed a design problem, not a flow problem.** With a 30% I/O budget, both critical
+  paths started at an input port: the systolic operands feed the multipliers directly, and SIMT's
+  instruction port drove decode, register read and the ALU in one cycle (fmax fell to 508 / 376 MHz).
+  The fix was RTL: a `REG_IN` parameter registers the inputs at the block edge. Duplicating SIMT's issue
+  register per lane in RTL did nothing, because Yosys merges identical flip-flops (`opt_merge`, and
+  `keep` on the register does not stop it); cloning it in the back end instead gained under 1%, so
+  that code was not kept.
+- **Hold needed a real fix only with unrealistic inputs.** With a zero input delay, inputs arrive at
+  time 0 while the clock tree delivers the edge ~130 ps later: 84 hold violations on the systolic
+  array. Chained delay buffers with a 10 ps margin, before and after routing, close it.
 - **Buffering mattered more than sizing.** The systolic array's 8-bit operands fan out to 31
   partial-product gates each from a single `AND2_X1`, and SIMT's register-file decoders drive up
   to 66 pins. Buffering those nets (and upsizing weak drivers) cleared every slew and capacitance
@@ -116,10 +132,11 @@ Red is the post-route critical path.
   routability-driven re-placement (SIMT needed one round), at a cost of a few percent fmax.
 - **Clock tree is geometric, not skew-balanced.** Median bisection keeps skew at 16–27 ps here,
   but there is no wire snaking or buffer sizing to drive skew to zero, and one clock domain only.
-- **Hold is register to register.** Input ports have no external timing (no input delays), so
-  paths from them are not hold-checked; neither design needed delay buffers.
-- **Input ports are ideal drivers.** Port nets such as SIMT's instruction bits (fanout ~600) are not
-  buffered, because no driving cell is modeled for them.
+- **One I/O budget for every port.** Input and output delays are a single fraction of the period;
+  there are no per-port constraints, multicycle or false paths. With `--no-io`, ports are ideal and
+  only register-to-register paths are hold-checked.
+- **Hold fixing uses buffer chains.** Nangate45 has no delay cells, so hold repair chains `BUF_X1`s:
+  with a zero input delay (`--io-budget 0`) the systolic array needs ~700 of them, costing 1% fmax.
 - **Power is a lower bound.** Cell internal power is not modeled. Nangate45 does not declare the
   unit of its `internal_power` tables, and the two Liberty readings (V²·fF = fJ, or V·mA·ns = pJ)
   differ 1000×; neither matches a 45 nm gate cleanly, so this waits for a calibration against a
@@ -128,8 +145,7 @@ Red is the post-route critical path.
 
 ## Roadmap
 
-1. Input and output constraints (input delays, driving cells, output loads), so port paths are
-   timed and buffered like internal ones.
+1. Per-port constraints, false and multicycle paths (a real SDC reader).
 2. Skew-balanced clock trees (wire snaking, buffer sizing) and multiple clock domains.
 3. Differentiable STA: slack gradients straight into placement, replacing net weights.
 4. Track assignment, then detailed routing.

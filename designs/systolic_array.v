@@ -27,7 +27,9 @@ module mac_pe #(parameter W = 8, parameter ACC = 24) (
     end
 endmodule
 
-module systolic_array #(parameter N = 4, parameter W = 8, parameter ACC = 24) (
+// REG_IN=1 registers a_west/b_north at the boundary: one more cycle of latency, but the input
+// port no longer feeds the multipliers combinationally (an I/O budget would eat that path).
+module systolic_array #(parameter N = 4, parameter W = 8, parameter ACC = 24, parameter REG_IN = 0) (
     input  wire               clk,
     input  wire               clr,
     input  wire [N*W-1:0]     a_west,   // row i at bits [i*W +: W]
@@ -36,12 +38,25 @@ module systolic_array #(parameter N = 4, parameter W = 8, parameter ACC = 24) (
 );
     wire [W-1:0] a_bus [0:N-1][0:N];
     wire [W-1:0] b_bus [0:N][0:N-1];
+    wire [N*W-1:0] a_src, b_src;
     genvar i, j;
     generate
+        if (REG_IN) begin : in_reg
+            reg [N*W-1:0] a_q, b_q;
+            always @(posedge clk) begin
+                a_q <= a_west;
+                b_q <= b_north;
+            end
+            assign a_src = a_q;
+            assign b_src = b_q;
+        end else begin : in_wire
+            assign a_src = a_west;
+            assign b_src = b_north;
+        end
         for (i = 0; i < N; i = i + 1) begin : row
-            assign a_bus[i][0] = a_west[i*W +: W];
+            assign a_bus[i][0] = a_src[i*W +: W];
             for (j = 0; j < N; j = j + 1) begin : col
-                if (i == 0) assign b_bus[0][j] = b_north[j*W +: W];
+                if (i == 0) assign b_bus[0][j] = b_src[j*W +: W];
                 mac_pe #(.W(W), .ACC(ACC)) pe (
                     .clk(clk), .clr(clr),
                     .a_in(a_bus[i][j]), .b_in(b_bus[i][j]),

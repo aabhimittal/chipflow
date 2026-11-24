@@ -52,6 +52,10 @@ def flow(a):
 
     log(f"[1/8] synthesis: {top} {params}")
     net, rep["synth"] = synth.synthesize(sources, top, params, out)
+    if a.io:  # SDC-style budget: the world outside the block uses io_budget of the cycle on each side
+        net.io = {"input_delay": a.io_budget * a.clock_ns, "output_delay": a.io_budget * a.clock_ns,
+                  "driver": a.input_driver, "output_load": a.output_load}
+        rep["io"] = net.io
     log(f"      {rep['synth']['cells']} cells, {rep['synth']['area_um2']:.0f} um2, {rep['synth']['flip_flops']} flip-flops, "
         f"{len(rep['synth']['lint_warnings'])} lint warnings")
 
@@ -131,6 +135,12 @@ def flow(a):
         rep["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
         t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
         log(f"      post-route sizing: {rep['sizing_post_route']['cells_upsized']} cells, rerouted overflow {rt['overflow']}")
+    if a.cts and t_rt["hold_failing"]:  # post-route hold repair on routed lengths, then reroute
+        rep["hold_fix_post_route"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns, net_len=rt["net_len"])
+        rt = route.route(net, lib, pl, lef)
+        rep["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
+        t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
+        log(f"      post-route hold fix: {rep['hold_fix_post_route']['buffers']} delay buffers, rerouted overflow {rt['overflow']}")
     rep["sta_routed"] = _summary(t_rt)
     rep["critical_path"] = [{k: v for k, v in st.items() if k != "idx"} for st in t_rt["critical_path"]]
     log(f"      setup WNS {t_rt['wns_ns']:+.3f} ns, TNS {t_rt['tns_ns']} ns, fmax {t_rt['fmax_mhz']} MHz, {len(t_rt['critical_path'])} stages; "
@@ -167,6 +177,10 @@ def main(argv=None):
     f.add_argument("--timing-driven", action=argparse.BooleanOptionalAction, default=True, help="re-place with critical nets weighted")
     f.add_argument("--size", action=argparse.BooleanOptionalAction, default=True, help="upsize cells when timing fails")
     f.add_argument("--cts", action=argparse.BooleanOptionalAction, default=True, help="build a clock tree, check and fix hold")
+    f.add_argument("--io", action=argparse.BooleanOptionalAction, default=True, help="time ports with I/O constraints")
+    f.add_argument("--io-budget", type=float, default=0.3, help="input and output delay as a fraction of the clock period")
+    f.add_argument("--input-driver", default="BUF_X4", help="library cell assumed to drive each input port")
+    f.add_argument("--output-load", type=float, default=4.0, help="load on each output port, fF")
     f.add_argument("--buffer", action=argparse.BooleanOptionalAction, default=True, help="buffer high-fanout nets, fix slew/cap limits")
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--out", default="runs/latest")
