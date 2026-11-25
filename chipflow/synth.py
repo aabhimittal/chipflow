@@ -19,6 +19,7 @@ class Netlist:
     ports: dict            # name -> (direction, [net ids])
     n_nets: int
     const: dict            # net id -> 0/1 for tie nets
+    io: dict | None = None # I/O constraints: input_delay, output_delay (ns), driver cell, output_load (fF)
 
     def drivers_sinks(self, lib):
         """drv[net] = (cell, pin) or ('port', name, bit); sinks[net] = [(cell, pin) or ('port', name, bit)]."""

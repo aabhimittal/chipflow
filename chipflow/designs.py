@@ -20,7 +20,7 @@ def systolic_tb(sim, params: dict, rng, lanes: int = 64) -> dict:
     zero = np.zeros(n * w, dtype=np.uint64)
     sim.step({"clr": np.array([np.uint64(0xFFFFFFFFFFFFFFFF)]), "a_west": zero, "b_north": zero})
     mask = (1 << w) - 1
-    for s in range(k + 2 * n - 1):
+    for s in range(k + 2 * n - 1 + params.get("REG_IN", 0)):  # input registers add a cycle
         west = np.concatenate([pack([a[l, i, s - i] & mask if 0 <= s - i < k else 0 for l in range(lanes)], w)
                                for i in range(n)])
         north = np.concatenate([pack([b[l, s - j, j] & mask if 0 <= s - j < k else 0 for l in range(lanes)], w)
@@ -49,7 +49,8 @@ def simt_tb(sim, params: dict, rng, lanes: int = 64, cycles: int = 200) -> dict:
     nl, nw, nr, w = params.get("LANES", 4), params.get("WARPS", 2), params.get("REGS", 8), params.get("W", 16)
     regs = np.zeros((lanes, nw, nr, nl), dtype=np.int64)  # sim lane, warp, reg, hw lane
     wid_bits = max(1, (nw - 1).bit_length())
-    pending, checked, errors = None, 0, 0
+    hist, checked, errors = [], 0, 0
+    delay = 1 + params.get("REG_IN", 0)  # write-back is registered; an issue register adds a cycle
     for t in range(cycles):
         boot = t < nw * nr                     # first: LI every register so state is defined
         op = np.full(lanes, 10) if boot else rng.choice([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0], size=lanes)
@@ -64,10 +65,10 @@ def simt_tb(sim, params: dict, rng, lanes: int = 64, cycles: int = 200) -> dict:
         rs2 = np.where(op == 10, (imm >> 3) & 7, rs2)
         out = sim.step({"clk": np.zeros(1, np.uint64), "valid": pack(valid, 1), "wid": pack(wid, wid_bits),
                         "instr": pack(instr, 16), "mask": pack(mask, nl)})
-        if pending is not None:
+        if len(hist) >= delay:
             got = np.array([unpack(out["wb"][h * w:(h + 1) * w], lanes) for h in range(nl)]).T
             checked += got.size
-            errors += int((got != pending).sum())
+            errors += int((got != hist[-delay]).sum())
         want = np.zeros((lanes, nl), dtype=np.int64)
         for s_ in range(lanes):
             for h in range(nl):
@@ -77,13 +78,13 @@ def simt_tb(sim, params: dict, rng, lanes: int = 64, cycles: int = 200) -> dict:
                 want[s_, h] = r if we else 0
                 if we and op[s_] not in (0, 15):
                     regs[s_, wid[s_], rd[s_], h] = r
-        pending = want
+        hist.append(want)
     return {"checked": checked, "mismatches": errors, "cycles": sim.cycles}
 
 
 DESIGNS = {
     "systolic": {"sources": [DESIGN_DIR / "systolic_array.v"], "top": "systolic_array",
-                 "params": {"N": 4, "W": 8, "ACC": 24}, "tb": systolic_tb},
+                 "params": {"N": 4, "W": 8, "ACC": 24, "REG_IN": 1}, "tb": systolic_tb},
     "simt": {"sources": [DESIGN_DIR / "simt_core.v"], "top": "simt_core",
-             "params": {"LANES": 4, "WARPS": 2, "REGS": 8, "W": 16}, "tb": simt_tb},
+             "params": {"LANES": 4, "WARPS": 2, "REGS": 8, "W": 16, "REG_IN": 1}, "tb": simt_tb},
 }

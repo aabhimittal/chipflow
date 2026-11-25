@@ -133,3 +133,19 @@ def test_clock_tree_buffering_and_hold_fix(lib, tmp_path):
     assert h["buffers"] > 0 and h["hold_failing"] == 0 and h["whs_after_ns"] >= 0
     res = designs.systolic_tb(sim.Simulator(net, lib), {"N": 2}, np.random.default_rng(0))
     assert res["mismatches"] == 0                     # clock tree, buffers and delay cells keep the logic
+
+
+@pytest.mark.parametrize("reg_in", [0, 1])
+def test_io_constraints_time_the_ports(lib, tmp_path, reg_in):
+    p = {"N": 2, "REG_IN": reg_in}
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", p, tmp_path)
+    assert designs.systolic_tb(sim.Simulator(net, lib), p, np.random.default_rng(0))["mismatches"] == 0
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    free = sta.analyze(net, lib, 2.0, pl, lef["macros"])
+    net.io = {"input_delay": 0.6, "output_delay": 0.6, "driver": "BUF_X4", "output_load": 4.0}
+    t = sta.analyze(net, lib, 2.0, pl, lef["macros"])
+    assert t["wns_ns"] <= free["wns_ns"] + 1e-9            # a budget never makes timing better
+    starts_at_input = t["critical_path"][0]["point"] == "input"
+    assert starts_at_input == (reg_in == 0)                 # registered inputs take the port off the critical path
+    assert t["whs_ns"] is not None and t["whs_ns"] > 0      # inputs now hold-checked; 0.6 ns delay is ample

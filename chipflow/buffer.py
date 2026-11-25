@@ -15,6 +15,8 @@ import numpy as np
 
 from chipflow import place, sta
 
+HOLD_MARGIN = 0.01  # ns: hold target, so routing's small arrival shifts do not tip flip-flops below zero
+
 
 def _clusters(pts, idx, cap):
     if len(idx) <= cap:
@@ -91,7 +93,7 @@ def repair_design(net, lib, lef, pl, period_ns, max_fanout=16, buf="BUF_X4", siz
     before = {"slew": t["slew_violations"], "cap": t["cap_violations"]}
     drv, sinks = net.drivers_sinks(lib)
     _, clk_nets, _ = sta.clock_network(net, lib, drv)
-    targets = [n for n, d in drv.items() if d[0] != "port" and n not in clk_nets and n not in net.const
+    targets = [n for n, d in drv.items() if (d[0] != "port" or net.io) and n not in clk_nets and n not in net.const
                and sum(s[0] != "port" for s in sinks[n]) > max_fanout]
     added = sum(buffer_tree(net, lib, lef, pl, n, buf, max_fanout, "buf_") for n in targets)
     upsized = 0
@@ -118,19 +120,23 @@ def fix_hold(net, lib, lef, pl, period_ns, buf="BUF_X1", rounds=4, setup_margin=
     t = sta.analyze(net, lib, period_ns, pl, macros, net_len)
     start, added = t["whs_ns"], 0
     for _ in range(rounds):
-        bad = [c for c, s in t["hold_by_ff"].items() if s < 0]
+        bad = [c for c, s in t["hold_by_ff"].items() if s < HOLD_MARGIN]
         if not bad:
             break
         for c in bad:
             d = lib[net.cells[c][1]].ff["next"]
-            n_d = net.pins[c][d]
-            if t["net_slack"].get(n_d, 0.0) < setup_margin:
-                continue  # no setup room for more delay on this path
-            out = _new_net(net)
-            x, y = pl.pin_xy(c, d, macros, net.cells[c][1])
-            _add_cell(net, pl, lef, f"hold_{len(net.cells)}", buf, {"A": n_d, "Z": out}, x, y)
-            net.pins[c][d] = out
-            added += 1
+            room = t["net_slack"].get(net.pins[c][d], 0.0) - setup_margin
+            # a BUF_X1 adds ~25 ps here: chain enough to cover the violation plus a 10 ps margin (routing
+            # shifts arrivals a little), as far as setup room allows
+            k = min(int(np.ceil((HOLD_MARGIN - t["hold_by_ff"][c]) / 0.025)), int(room / 0.035))
+            for _ in range(max(0, k)):
+                n_d = net.pins[c][d]
+                out = _new_net(net)
+                x, y = pl.pin_xy(c, d, macros, net.cells[c][1])
+                _add_cell(net, pl, lef, f"hold_{len(net.cells)}", buf, {"A": n_d, "Z": out}, x, y)
+                net.pins[c][d] = out
+                added += 1
         _legalize(pl, lef)
         t = sta.analyze(net, lib, period_ns, pl, macros, net_len)
     return {"buffers": added, "whs_before_ns": start, "whs_after_ns": t["whs_ns"], "hold_failing": t["hold_failing"]}
+

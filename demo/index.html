@@ -138,9 +138,9 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
         <h3>Try this</h3>
         <ul>
           <li><b>Structure survives.</b> Color the systolic array by block: its 16 processing elements land as 16 tiles in a rough 4×4 grid, though nothing told the placer about the grid. Wires between neighbors pulled them there.</li>
-          <li><b>Where GPUs hurt.</b> Turn on congestion for each design. The SIMT core runs 1,388 tiles above 85% of their tracks, against 459 on the systolic array, because its register-file read muxes fan wires in from everywhere. Its first routing attempt overflowed, so the flow inflated the cells in the hot tiles and re-placed them; one round was enough to route cleanly.</li>
-          <li><b>Follow the slowest path.</b> On the systolic array, the red line stays inside one PE: flip-flop → signed multiplier → adder → accumulator, 29 gates. On SIMT it starts at the instruction input and runs through register-file muxes into the ALU.</li>
-          <li><b>Count the memory.</b> Color the SIMT core by kind: 1,024 of its 1,088 flip-flops are register-file bits.</li>
+          <li><b>Where GPUs hurt.</b> Turn on congestion for each design. The SIMT core runs 1,620 tiles above 85% of their tracks, against 549 on the systolic array, because its register-file read muxes fan wires in from everywhere. Its first routing attempt overflowed, so the flow inflated the cells in the hot tiles and re-placed them; one round was enough to route cleanly.</li>
+          <li><b>Follow the slowest path.</b> On the systolic array, the red line stays inside one PE: flip-flop → signed multiplier → adder → accumulator, 29 gates. On SIMT it starts at the issue register that holds the incoming instruction, fans out through buffer trees to every lane's decoders, then runs through register-file muxes into the ALU: 33 gates.</li>
+          <li><b>Count the memory.</b> Color the SIMT core by kind: 1,024 of its 1,110 flip-flops are register-file bits; 22 more form the issue register.</li>
         </ul>
       </div>
     </div>
@@ -348,6 +348,7 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
       ["Verification", fmt(v.checked) + " outputs" + '<span class="pill ' + (v.mismatches === 0 ? "ok" : "warn") + '">' + (v.mismatches === 0 ? "0 mismatches" : v.mismatches + " mismatches") + "</span>"],
       ["Core", r.place.core_um.map(x => fmt(x)).join(" × ") + " µm @ " + Math.round(r.place.utilization * 100) + "%"],
       ["Clock target", d.clock_ns.toFixed(1) + " ns (" + fmt(1000 / d.clock_ns) + " MHz)"],
+      ["I/O budget", r.io ? fmt(100 * r.io.input_delay / d.clock_ns) + "% of the cycle each side, " + r.io.driver + " drivers" : "ports unconstrained"],
       ["fmax after routing", fmt(t.fmax_mhz, 1) + " MHz" + '<span class="pill ' + (t.wns_ns >= 0 ? "ok" : "warn") + '">' + (t.wns_ns >= 0 ? "meets clock" : "fails clock") + "</span>"],
       ["Worst slack (WNS)", (t.wns_ns >= 0 ? "+" : "") + t.wns_ns.toFixed(3) + " ns"],
       ["Clock skew", t.clock && t.clock.propagated ? fmt(t.clock.skew_ns * 1000) + " ps over " + fmt(t.clock.buffers) + " clock buffers" : "ideal clock"],
