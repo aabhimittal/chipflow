@@ -139,8 +139,11 @@ Red is the post-route critical path.
   19 / 27 ps of skew. Measured on the routed critical paths, the capturing flip-flop's clock arrives
   6.7 / 10.3 ps *after* the launching one's: skew is lending the slowest path time. A zero-skew tree
   would cost ~0.5% fmax, and even fully adverse skew is 1.2–1.4% of the path, with hold margin
-  above 100 ps. The lever worth building is useful skew (delay the capture clock of critical
-  endpoints on purpose), not balancing.
+  above 100 ps. Skew does grow with the die: an 8×8 array (51k cells, 2,688 flip-flops, 272 clock
+  buffers) has 68 ps, but its critical path still sees +1.2 ps. Since zero skew shifts every
+  path's slack by −(capture − launch), it cannot raise WNS above the current critical path's
+  slack minus that term: balancing can only lose here. The lever worth building is useful skew
+  (delay the capture clock of critical endpoints on purpose), not balancing.
 - **SDC subset, one clock.** The timer keeps one arrival per net (no path tags), so exceptions name
   one side only: `set_false_path -from` *or* `-to`, `set_multicycle_path -to`; `-through` and
   `-from A -to B` are rejected. `get_ports` takes whole buses (`a_west`, not `a_west[3]`). One clock,
