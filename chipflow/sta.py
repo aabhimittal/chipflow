@@ -32,8 +32,7 @@ MAX_SLEW = 0.198535                                 # Nangate45 default_max_tran
 RF = ("r", "f")
 RISE = {"r": "rise", "f": "fall"}
 NEVER = 1e9
-CK = ("~clock", frozenset(), frozenset())   # tag of clock-tree arrivals
-UNTIMED = (None, frozenset(), frozenset())  # propagated for slew only, never checked
+CK, UNTIMED = 0, 1   # tag ids: clock-tree arrivals; propagated for slew only, never checked
 
 
 def clock_network(net, lib, drv=None):
@@ -91,7 +90,8 @@ def _template(cell):
                 for t_out in RF:
                     if f"cell_{RISE[t_out]}" in arc.tables:
                         ins = {"positive_unate": [t_out], "negative_unate": ["f" if t_out == "r" else "r"]}.get(arc.sense, list(RF))
-                        edges[t_out] = (arc.tables[f"cell_{RISE[t_out]}"], arc.tables[f"{RISE[t_out]}_transition"], ins)
+                        edges[t_out] = (arc.tables[f"cell_{RISE[t_out]}"], arc.tables[f"{RISE[t_out]}_transition"],
+                                        [(t_in, 2 * (t_in == "f") + (t_out == "f")) for t_in in ins])
                 arcs.append((arc.related, edges))
             outs.append((p.name, arcs))
         _TEMPLATES[id(cell)] = (cell, outs)   # holding the cell keeps its id from being reused
@@ -190,19 +190,31 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
     thr_of = {n: frozenset(v) for n, v in thr_of.items()}
     from_ex = [i for i, ex in enumerate(exs) if ex.get("from") is not None]
 
+    # tags are (launch clock, -from exception ids, -through exception ids), interned as small ints
+    tags = [("~clock", frozenset(), frozenset()), (None, frozenset(), frozenset())]
+    tag_id = {g: i for i, g in enumerate(tags)}
+
+    def intern(g):
+        if g not in tag_id:
+            tag_id[g] = len(tags)
+            tags.append(g)
+            assert len(tags) < 4096, "too many path tags"   # packed into the delay-cache key below
+        return tag_id[g]
+
     def start_tag(clk, key, n):
         if clk is None:
             return UNTIMED
         frm = frozenset(i for i in from_ex if key in exs[i]["from"] or ("clock", clk) in exs[i]["from"])
-        return clk, frm, thr_of.get(n, frozenset())
+        return intern((clk, frm, thr_of.get(n, frozenset())))
 
-    def bump(g, n):
-        b = thr_of.get(n)
-        return g if b is None or g[0] is None or b <= g[2] else (g[0], g[1], g[2] | b)
+    def bump(gid, n):
+        b, g = thr_of.get(n), tags[gid]
+        return gid if b is None or g[0] is None or b <= g[2] else intern((g[0], g[1], g[2] | b))
 
-    def check(key, cap, g):
+    def check(key, cap, gid):
         """None if this (start tag, endpoint) pair is not timed, else (setup N, hold M)."""
-        if g[0] is None or g[0] == CK[0] or cap is None:
+        g = tags[gid]
+        if g[0] is None or gid == CK or cap is None:
             return None
         if any(any(g[0] in a for a in grp) and any(cap in b for b in grp) and
                not any(g[0] in a and cap in a for a in grp) for grp in groups):
@@ -248,20 +260,24 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
                 out = {}
                 ld = load[n]
                 for slot, n_in, related, edges in cell_arcs:
+                    din = at.get(n_in)
+                    if not din:
+                        continue
                     w = wire.get((n_in, (c, related)), 0.0)
-                    for g_in, d_in in at.get(n_in, {}).items():
+                    for g_in, d_in in din.items():
                         g = bump(g_in, n) if thr_of else g_in
                         cur = out.get(g)
                         if cur is None:
                             cur = out[g] = {}
+                        key = (slot << 14) | (g_in << 2)
                         for t_out, (dtab, stab, ins) in edges.items():
-                            for t_in in ins:
+                            for t_in, code in ins:
                                 if t_in not in d_in:
                                     continue
                                 a_in, s_in, _ = d_in[t_in]
                                 dly = dtab(s_in, ld)
                                 if not early:
-                                    dcache[slot, g_in, t_in, t_out] = dly
+                                    dcache[key | code] = dly
                                 a = a_in + w + dly
                                 if t_out not in cur or (a < cur[t_out][0] if early else a > cur[t_out][0]):
                                     cur[t_out] = (a, stab(s_in, ld), (n_in, g_in, t_in, c, related, dly))
@@ -311,7 +327,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
             chk = check(c, cap, g)
             if chk is None:
                 continue
-            R = rel(g[0], cap)[0] + (chk[0] - 1) * clocks[cap][0]
+            R = rel(tags[g][0], cap)[0] + (chk[0] - 1) * clocks[cap][0]
             for t in d:
                 a, s = sink(at, n, (c, dpin), g, t)
                 su = arc.tables[f"{RISE[t]}_constraint"](s, s_ck) if arc else 0.0
@@ -326,7 +342,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
                 chk = check(("port", name), cap, g)
                 if chk is None:
                     continue
-                R = rel(g[0], cap)[0] + (chk[0] - 1) * clocks[cap][0]
+                R = rel(tags[g][0], cap)[0] + (chk[0] - 1) * clocks[cap][0]
                 for t in dd:
                     a, _ = sink(at, n, ("port", name, b), g, t)
                     ends.append((R - od - a - unc_setup, f"{name}[{b}]", n, t, ("port", name, b), R, g))
@@ -349,12 +365,13 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
                     if not r_out:
                         continue
                     r_in = req.setdefault(n_in, {}).setdefault(g_in, {})
+                    key = (slot << 14) | (g_in << 2)
                     for t_out, (_, _, ins) in edges.items():
                         if t_out not in r_out:
                             continue
-                        for t_in in ins:
+                        for t_in, code in ins:
                             if t_in in d_in:
-                                v = r_out[t_out] - dcache[slot, g_in, t_in, t_out] - w
+                                v = r_out[t_out] - dcache[key | code] - w
                                 if v < r_in.get(t_in, math.inf):
                                     r_in[t_in] = v
     net_slack = {n: min(r - at[n][g][t][0] for g, rg in rn.items() for t, r in rg.items())
@@ -377,7 +394,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
                 chk = check(c, cap, g)
                 if chk is None:
                     continue
-                H = rel(g[0], cap)[1] + (chk[0] - 1 - chk[1]) * clocks[cap][0]
+                H = rel(tags[g][0], cap)[1] + (chk[0] - 1 - chk[1]) * clocks[cap][0]
                 for t in d:
                     a, s = sink(at_e, n, (c, dpin), g, t)
                     h = arc.tables[f"{RISE[t]}_constraint"](s, s_ck) if arc else 0.0
@@ -391,7 +408,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
                     chk = check(("port", name), cap, g)
                     if chk is None:
                         continue
-                    H = rel(g[0], cap)[1] + (chk[0] - 1 - chk[1]) * clocks[cap][0]
+                    H = rel(tags[g][0], cap)[1] + (chk[0] - 1 - chk[1]) * clocks[cap][0]
                     a = min(sink(at_e, n, ("port", name, b), g, t)[0] for t in dd)
                     port_hold.append(a + io["output_delay"][name][1] - H - unc_hold)
     hold.sort()

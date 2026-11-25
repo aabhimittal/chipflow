@@ -157,6 +157,8 @@ def useful_skew(net, lib, lef, pl, period_ns, rounds=8, window=0.03, max_chain=6
     t = sta.analyze(net, lib, period_ns, pl, macros, net_len)
     wns0, added, kept = t["wns_ns"], 0, 0
     for _ in range(rounds):
+        if t["wns_ns"] >= 0:   # met: more skew only costs clock power and hold margin
+            break
         sbe, ns = t["slack_by_endpoint"], t["net_slack"]
         plan = {}
         for c, (inst, typ) in enumerate(net.cells):
