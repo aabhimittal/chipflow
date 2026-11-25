@@ -3,6 +3,7 @@
   python -m chipflow fetch-pdk
   python -m chipflow flow --design systolic --param N=4 --clock-ns 2.0 --out runs/sa4
   python -m chipflow flow --verilog my.v --top my_top --clock-ns 1.5 --out runs/my
+  python -m chipflow flow --design systolic --sdc designs/systolic_array.sdc --out runs/sa4_sdc
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from chipflow import buffer, designs, layout, pdk, place, power, route, sim, size, sta, synth
+from chipflow import buffer, designs, layout, pdk, place, power, route, sdc, sim, size, sta, synth
 
 
 def _clean(o):
@@ -48,14 +49,21 @@ def flow(a):
     for kv in a.param or []:
         k, v = kv.split("=")
         params[k] = int(v)
-    rep = {"design": top, "params": params, "clock_ns": a.clock_ns}
+    rep = {"design": top, "params": params}
 
     log(f"[1/8] synthesis: {top} {params}")
     net, rep["synth"] = synth.synthesize(sources, top, params, out)
-    if a.io:  # SDC-style budget: the world outside the block uses io_budget of the cycle on each side
-        net.io = {"input_delay": a.io_budget * a.clock_ns, "output_delay": a.io_budget * a.clock_ns,
-                  "driver": a.input_driver, "output_load": a.output_load}
-        rep["io"] = net.io
+    if a.sdc:   # constraints file; its create_clock sets the period unless --clock-ns is given
+        net.io, period = sdc.read(a.sdc, net, lib)
+        a.clock_ns = a.clock_ns or period or 2.0
+        rep["io"] = {"sdc": Path(a.sdc).name} | sdc.summary(net.io)
+    else:
+        a.clock_ns = a.clock_ns or 2.0
+        if a.io:  # default budget: the world outside the block uses io_budget of the cycle on each side
+            d = a.io_budget * a.clock_ns
+            net.io = sdc.budget(net, d, a.input_driver, a.output_load)
+            rep["io"] = {"input_delay": d, "output_delay": d, "driver": a.input_driver, "output_load": a.output_load}
+    rep["clock_ns"] = a.clock_ns
     log(f"      {rep['synth']['cells']} cells, {rep['synth']['area_um2']:.0f} um2, {rep['synth']['flip_flops']} flip-flops, "
         f"{len(rep['synth']['lint_warnings'])} lint warnings")
 
@@ -171,7 +179,8 @@ def main(argv=None):
     src.add_argument("--verilog", nargs="+")
     f.add_argument("--top")
     f.add_argument("--param", action="append", help="NAME=INT parameter override")
-    f.add_argument("--clock-ns", type=float, default=2.0)
+    f.add_argument("--clock-ns", type=float, default=None, help="clock period (default: the SDC's create_clock, else 2.0)")
+    f.add_argument("--sdc", help="timing constraints file (replaces --io-budget/--input-driver/--output-load)")
     f.add_argument("--util", type=float, default=0.6)
     f.add_argument("--routability-rounds", type=int, default=2, help="re-place congested regions up to N times")
     f.add_argument("--timing-driven", action=argparse.BooleanOptionalAction, default=True, help="re-place with critical nets weighted")

@@ -18,7 +18,7 @@ Verilog ─► lint + synthesis ─► gate-level simulation ─► floorplan �
 | Verification | front | Bit-parallel gate-level simulator: 64 independent test vectors per pass, cell behavior compiled from the Liberty `function` strings, compared with a Python golden model | `sim.py`, `designs.py` |
 | Floorplan + placement | back | Core sized for a target utilization; global placement minimizes weighted-average wirelength plus an electrostatic density energy (FFT Poisson solve); a gap-filling legalizer snaps cells to rows and sites. **Timing-driven**: near-critical nets are weighted and the design re-placed. **Routability-driven**: cells in congested gcells are inflated and re-placed until routing overflow clears | `place.py` |
 | Static timing | back | Rise/fall propagation with unateness through Liberty NLDM delay and slew tables; Elmore wire delay from placed or routed lengths; propagated clock through the clock tree (latency and skew per flip-flop); setup on latest arrivals, hold on earliest (register to register); slew and capacitance limit checks; backward required-time pass for slack on every net; critical path trace | `sta.py` |
-| I/O constraints | back | SDC-style budget on the netlist: each input port arrives at `io-budget` × period through a `BUF_X4` driving cell; outputs must be ready `io-budget` × period before the edge into a 4 fF load. Port paths are then timed for setup and hold and port nets are buffered like internal ones | `sta.py`, `cli.py` |
+| Constraints (SDC) | back | Reads the everyday SDC subset: `create_clock`, per-port `set_input_delay` / `set_output_delay` (with `-max` / `-min`), `set_driving_cell`, `set_load`, `set_false_path`, `set_multicycle_path` (with SDC's hold-edge rule), `set_clock_uncertainty`, `set` / `expr`, and `get_ports` / `get_cells` / `all_*` queries. `get_cells` matches flip-flops by their RTL register name (`row[0].col[1].pe.acc[3]`). Unsupported commands are errors, not silently dropped. Without a file, the default is a budget: inputs arrive at `io-budget` × period through a `BUF_X4`, outputs must be ready as early into 4 fF. Port paths are timed for setup and hold and port nets are buffered like internal ones | `sdc.py`, `sta.py` |
 | Clock tree + buffers | back | Clock-tree synthesis: each clock's flip-flops are split by recursive median bisection into groups of ≤ 16 under a `CLKBUF_X3`, level by level up to the clock pin. Design-rule repair: nets driving > 16 pins get a `BUF_X4` tree, then drivers still over the slew or capacitance limit are upsized. Hold fixing: `BUF_X1` delay cells in front of flip-flops whose data arrives too early, where setup slack allows | `buffer.py` |
 | Timing repair | back | Gate sizing: worst-slack cells move up the library's drive strengths (X1 → X2 → X4…) in batches kept only if WNS improves; runs after buffering and again on routed lengths | `size.py` |
 | Global routing | back | Gcell grid with track capacities from metal2–6 pitches; MST net decomposition; L-shape initial routes; negotiated rip-up and reroute (PathFinder) with A* | `route.py` |
@@ -55,7 +55,12 @@ pytest -q                            # ~15 s
 python -m chipflow flow --design systolic --param N=4 --clock-ns 2.0 --out runs/sa4
 python -m chipflow flow --design simt --clock-ns 3.0 --out runs/simt
 python -m chipflow flow --verilog my.v --top my_top --clock-ns 2.0 --out runs/mine   # your own RTL
+python -m chipflow flow --design systolic --sdc designs/systolic_array.sdc --out runs/sa4_sdc  # constraints file
 ```
+
+[`designs/systolic_array.sdc`](designs/systolic_array.sdc) is a worked example: the same 30% budget written
+as SDC, plus 50 ps of clock uncertainty and a two-cycle multicycle path on the accumulator pins. It
+times at 625 MHz instead of 645: the uncertainty alone, as 1.549 + 0.050 ns = 1.599 ns.
 
 ## Results (CPU, 4 cores, defaults)
 
@@ -130,11 +135,17 @@ Red is the post-route critical path.
   parasitic extraction, and timing uses one typical corner.
 - **Global routing only.** No track assignment or detailed routing. Overflow is now cleared by
   routability-driven re-placement (SIMT needed one round), at a cost of a few percent fmax.
-- **Clock tree is geometric, not skew-balanced.** Median bisection keeps skew at 16–27 ps here,
-  but there is no wire snaking or buffer sizing to drive skew to zero, and one clock domain only.
-- **One I/O budget for every port.** Input and output delays are a single fraction of the period;
-  there are no per-port constraints, multicycle or false paths. With `--no-io`, ports are ideal and
-  only register-to-register paths are hold-checked.
+- **Clock tree is geometric, not skew-balanced, on purpose for now.** Median bisection leaves
+  19 / 27 ps of skew. Measured on the routed critical paths, the capturing flip-flop's clock arrives
+  6.7 / 10.3 ps *after* the launching one's: skew is lending the slowest path time. A zero-skew tree
+  would cost ~0.5% fmax, and even fully adverse skew is 1.2–1.4% of the path, with hold margin
+  above 100 ps. The lever worth building is useful skew (delay the capture clock of critical
+  endpoints on purpose), not balancing.
+- **SDC subset, one clock.** The timer keeps one arrival per net (no path tags), so exceptions name
+  one side only: `set_false_path -from` *or* `-to`, `set_multicycle_path -to`; `-through` and
+  `-from A -to B` are rejected. `get_ports` takes whole buses (`a_west`, not `a_west[3]`). One clock,
+  no generated clocks or clock groups. With `--no-io`, ports are ideal and only register-to-register
+  paths are hold-checked.
 - **Hold fixing uses buffer chains.** Nangate45 has no delay cells, so hold repair chains `BUF_X1`s:
   with a zero input delay (`--io-budget 0`) the systolic array needs ~700 of them, costing 1% fmax.
 - **Power is a lower bound.** Cell internal power is not modeled. Nangate45 does not declare the
@@ -145,8 +156,8 @@ Red is the post-route critical path.
 
 ## Roadmap
 
-1. Per-port constraints, false and multicycle paths (a real SDC reader).
-2. Skew-balanced clock trees (wire snaking, buffer sizing) and multiple clock domains.
+1. Path-tagged STA, for `-from A -to B` / `-through` exceptions and multiple clock domains.
+2. Useful-skew clock scheduling: delay capture clocks of critical endpoints, bounded by hold.
 3. Differentiable STA: slack gradients straight into placement, replacing net weights.
 4. Track assignment, then detailed routing.
 5. GPU kernels for placement density, STA propagation and routing cost updates, for designs

@@ -4,7 +4,7 @@ import itertools
 import numpy as np
 import pytest
 
-from chipflow import designs, pdk, place, route, sim, size, sta, synth
+from chipflow import designs, pdk, place, route, sdc, sim, size, sta, synth
 from chipflow.pdk import Table
 from chipflow.sim import compile_function
 
@@ -143,9 +143,56 @@ def test_io_constraints_time_the_ports(lib, tmp_path, reg_in):
     lef = pdk.load_lef()
     pl = place.place(net, lib, lef)
     free = sta.analyze(net, lib, 2.0, pl, lef["macros"])
-    net.io = {"input_delay": 0.6, "output_delay": 0.6, "driver": "BUF_X4", "output_load": 4.0}
+    net.io = sdc.budget(net, 0.6, "BUF_X4", 4.0)
     t = sta.analyze(net, lib, 2.0, pl, lef["macros"])
     assert t["wns_ns"] <= free["wns_ns"] + 1e-9            # a budget never makes timing better
     starts_at_input = t["critical_path"][0]["point"] == "input"
     assert starts_at_input == (reg_in == 0)                 # registered inputs take the port off the critical path
     assert t["whs_ns"] is not None and t["whs_ns"] > 0      # inputs now hold-checked; 0.6 ns delay is ample
+
+
+def test_sdc_reader_matches_budget_and_applies_exceptions(lib, tmp_path):
+    p = {"N": 2, "REG_IN": 1}
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", p, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    run = lambda: sta.analyze(net, lib, 2.0, pl, lef["macros"])
+    net.io = sdc.budget(net, 0.6, "BUF_X4", 4.0)
+    base = run()
+    io = """set p 2.0
+create_clock -name core -period $p [get_ports clk]
+set_input_delay [expr 0.3 * $p] -clock core [remove_from_collection [all_inputs] [get_ports clk]]
+set_driving_cell -lib_cell BUF_X4 [all_inputs]
+set_output_delay 0.6 [all_outputs]   ;# same budget, spelled as SDC
+set_load 4.0 [all_outputs]
+"""
+    net.io, period = sdc.read(io, net, lib)
+    t = run()
+    assert period == 2.0 and t["slack_by_endpoint"] == base["slack_by_endpoint"] and t["whs_ns"] == base["whs_ns"]
+
+    r = sdc._Reader(net, lib)
+    acc = {c for _, c in r.c_get_cells(["*.pe.acc*"])}
+    assert len(acc) == 4 * 24                                  # every accumulator bit, by its RTL name
+    ep = lambda c: f"{net.cells[c][0]}/{lib[net.cells[c][1]].ff['next']}"
+    assert any(ep(c) == base["critical_endpoint"] for c in acc)
+
+    net.io, _ = sdc.read(io + "set_multicycle_path 2 -setup -to [get_cells *.pe.acc*]\n", net, lib)
+    m = run()                                                  # capture one cycle later, and (SDC) hold too
+    assert all(m["slack_by_endpoint"][ep(c)] == pytest.approx(base["slack_by_endpoint"][ep(c)] + 2.0, abs=1e-3) for c in acc)
+    assert all(m["hold_by_ff"][c] == pytest.approx(base["hold_by_ff"][c] - 2.0, abs=1e-6) for c in acc)
+    t_req = max(2.0 - s / (2 if k in {ep(c) for c in acc} else 1) for k, s in m["slack_by_endpoint"].items())
+    assert m["fmax_mhz"] == pytest.approx(1000 / t_req, abs=0.2) and m["fmax_mhz"] > base["fmax_mhz"]
+
+    net.io, _ = sdc.read(io + "set_multicycle_path 2 -setup -to [get_cells *.pe.acc*]\n"
+                              "set_multicycle_path 1 -hold -to [get_cells *.pe.acc*]\n", net, lib)
+    assert run()["hold_by_ff"] == pytest.approx(base["hold_by_ff"])  # -hold N-1 puts hold back on the launch edge
+
+    net.io, _ = sdc.read(io + "set_false_path -to [get_cells *.pe.acc*]\nset_clock_uncertainty 0.05\n", net, lib)
+    f = run()
+    assert not any(ep(c) in f["slack_by_endpoint"] for c in acc) and len(f["slack_by_endpoint"]) == len(base["slack_by_endpoint"]) - 96
+    assert f["whs_ns"] == pytest.approx(min(s for c, s in base["hold_by_ff"].items() if c not in acc) - 0.05, abs=1e-3)
+
+    for bad in ("set_max_fanout 8 [current_design]", "set_input_delay 0.1 [get_ports nope]",
+                "set p [expr __import__('os')]", "set_false_path -from [get_ports clr] -to [all_outputs]"):
+        with pytest.raises(ValueError):
+            sdc.read(bad + "\n", net, lib)
