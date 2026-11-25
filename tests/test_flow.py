@@ -193,6 +193,88 @@ set_load 4.0 [all_outputs]
     assert f["whs_ns"] == pytest.approx(min(s for c, s in base["hold_by_ff"].items() if c not in acc) - 0.05, abs=1e-3)
 
     for bad in ("set_max_fanout 8 [current_design]", "set_input_delay 0.1 [get_ports nope]",
-                "set p [expr __import__('os')]", "set_false_path -from [get_ports clr] -to [all_outputs]"):
+                "set p [expr __import__('os')]", "set_false_path -through [get_nets in_reg.a_q*] -through [get_nets in_reg.b_q*]",
+                "set_input_delay 0.1 -clock nope [get_ports clr]"):
         with pytest.raises(ValueError):
             sdc.read(bad + "\n", net, lib)
+
+
+def test_path_tags_make_two_sided_and_through_exceptions_exact(lib, tmp_path):
+    p = {"N": 2, "REG_IN": 1}
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", p, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    io = "create_clock -period 2.0 [get_ports clk]\n"
+    def run(extra):
+        net.io, _ = sdc.read(io + extra + "\n", net, lib)
+        return sta.analyze(net, lib, 2.0, pl, lef["macros"])["slack_by_endpoint"]
+    r = sdc._Reader(net, lib)
+    B = {f"{net.cells[c][0]}/D" for _, c in r.c_get_cells(["row[0].col[0].pe.acc*"])}
+    A, B_sdc = "[get_cells in_reg.*]", "[get_cells row[0].col[0].pe.acc*]"
+    base, from_a = run(""), run(f"set_false_path -from {A}")
+    only_a = run(f"set_false_path -from [remove_from_collection [all_registers] {A}]")
+    both = run(f"set_false_path -from {A} -to {B_sdc}")
+    assert any(both[e] != base[e] for e in B)                          # the exception bites ...
+    assert all(both[e] == (from_a[e] if e in B else base[e]) for e in base)   # ... exactly on A -> B paths
+    assert run("set_false_path -through [get_nets in_reg.*]") == from_a   # every path from in_reg crosses its nets
+    mcp = run(f"set_multicycle_path 2 -from {A} -to {B_sdc}")         # A -> B gets 2 cycles, the rest of B keeps 1
+    assert all(mcp[e] == pytest.approx(min(from_a[e], only_a[e] + 2.0) if e in B else base[e], abs=2e-4) for e in base)
+
+
+@pytest.mark.parametrize("launch, capture, want", [((2, 0), (3, 0), (1, -1)), ((3, 0), (2, 0), (1, -1)),
+                                                   ((2, 0), (2, 0), (2, 0)), ((2, 0), (2, 0.5), (0.5, -1.5))])
+def test_clock_relations(launch, capture, want):
+    assert sta.relation(launch, capture) == pytest.approx(want)
+
+
+def test_two_clock_domains(lib, tmp_path):
+    v = tmp_path / "two_clk.v"
+    v.write_text("""module two_clk(input clk_a, input clk_b, input [7:0] d, output reg [7:0] q);
+  reg [7:0] r, s;
+  always @(posedge clk_a) r <= d + 8'd1;
+  always @(posedge clk_b) begin s <= r * 8'd3; q <= s ^ r; end
+endmodule
+""")
+    net, _ = synth.synthesize([v], "two_clk", {}, tmp_path / "w")
+    with pytest.raises(ValueError):                                   # a clock pin left undefined is an error
+        sdc.read("create_clock -period 2 [get_ports clk_a]\n", net, lib)
+    def run(pa, pb, extra=""):
+        net.io, per = sdc.read(f"create_clock -period {pa} [get_ports clk_a]\ncreate_clock -period {pb} [get_ports clk_b]\n"
+                               "set_input_delay 0.2 -clock clk_a [get_ports d]\n" + extra + "\n", net, lib)
+        return sta.analyze(net, lib, per, hold=True)
+    r = sdc._Reader(net, lib)
+    ep = lambda pat: {f"{net.cells[c][0]}/D": c for _, c in r.c_get_cells([pat])}
+    s_ep, q_ep, r_ep = ep("s*"), ep("q*"), ep("r*")
+    two, one = run(2.0, 3.0), run(1.0, 1.0)            # a->b setup relation is 1.0 ns: same as two 1.0 ns clocks
+    assert two["clock"]["domains"] == {"clk_a": 2.0, "clk_b": 3.0}
+    assert all(two["slack_by_endpoint"][e] == pytest.approx(one["slack_by_endpoint"][e], abs=1e-4) for e in s_ep)
+    assert all(two["slack_by_endpoint"][e] == pytest.approx(one["slack_by_endpoint"][e] + 1.0, abs=1e-4) for e in r_ep)
+    assert all(two["hold_by_ff"][c] == pytest.approx(one["hold_by_ff"][c] + 1.0, abs=1e-6) for c in s_ep.values())
+    grp = run(2.0, 3.0, "set_clock_groups -asynchronous -group [get_clocks clk_a] -group clk_b")
+    assert not set(s_ep) & set(grp["slack_by_endpoint"])            # only r -> s crosses: s goes untimed
+    assert all(grp["slack_by_endpoint"][e] == pytest.approx(two["slack_by_endpoint"][e]) for e in r_ep)
+    assert set(q_ep) <= set(grp["slack_by_endpoint"])                 # q keeps its clk_b -> clk_b path from s
+
+
+def test_useful_skew_borrows_time_through_the_clock(lib, tmp_path):
+    from chipflow import buffer
+    p = {"N": 2, "REG_IN": 1}
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", p, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    net.io = sdc.budget(net, 0.4, "BUF_X4", 4.0)
+    buffer.cts(net, lib, lef, pl)
+    T = 1.3
+    before = sta.analyze(net, lib, T, pl, lef["macros"])
+    assert before["wns_ns"] < 0 and before["hold_failing"] == 0
+    r = buffer.useful_skew(net, lib, lef, pl, T)
+    after = r["sta"]
+    assert r["buffers"] > 0 and after["wns_ns"] > before["wns_ns"] + 0.05 and after["hold_failing"] == 0
+    assert after["wns_ns"] == sta.analyze(net, lib, T, pl, lef["macros"])["wns_ns"]     # the returned timing is current
+    skew = [c for c, (name, _) in enumerate(net.cells) if name.startswith("skew_")]
+    assert len(skew) == r["buffers"] and set(skew) <= sta.clock_network(net, lib)[0]   # all on the clock tree
+    assert after["clock"]["skew_ns"] > before["clock"]["skew_ns"]                       # skew is now deliberate
+    assert designs.systolic_tb(sim.Simulator(net, lib), p, np.random.default_rng(0))["mismatches"] == 0
+    snap = (list(net.cells), net.n_nets, pl.x.copy())            # converged: another call keeps nothing it cannot gain
+    again = buffer.useful_skew(net, lib, lef, pl, T, rounds=1)
+    assert again["rounds_kept"] == 1 or (net.cells == snap[0] and net.n_nets == snap[1] and np.array_equal(pl.x, snap[2]))

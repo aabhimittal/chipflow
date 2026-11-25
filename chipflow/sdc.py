@@ -6,18 +6,20 @@ Both produce one dict on `net.io`, which chipflow.sta reads:
   output_delay {port: (max, min) ns}    time the outside world needs after an output
   driver       {port: lib cell}         cell assumed to drive an input (none: ideal edge)
   output_load  {port: fF}               load on an output (none: 0)
-  false_from   {start}                  paths from these start points are not timed
-  false_to     {end}                    paths into these end points are not timed
-  multicycle   {end: (setup N, hold M)} capture N cycles later; hold edge (N - 1 - M) cycles after launch
+  clocks       {name: {period, rise, ports}}   in definition order; the first is the primary clock
+  input_clock / output_clock {port: clock}     the clock a port delay is relative to (default: primary)
+  clock_groups [[{clocks}, {clocks}, ...]]     one entry per set_clock_groups: no paths between groups
+  exceptions   [{kind: false|mcp, from, through, to, setup, hold}]   from/through/to: set or None
   uncertainty  (setup, hold) ns         subtracted from every setup / hold slack
 
-Start and end points are flip-flop indices or ("port", name). Ports without a delay are
-unconstrained, as in SDC: paths from or to them are not timed.
+From/to members are flip-flop indices, ("port", name) or ("clock", name); through members are
+net ids. Ports without a delay are unconstrained, as in SDC: paths from or to them are not timed.
 
-Supported commands: create_clock, set_input_delay, set_output_delay, set_driving_cell, set_load,
-set_false_path (-from or -to), set_multicycle_path (-to), set_clock_uncertainty, set and expr;
-object queries get_ports, get_cells, get_clocks, all_inputs, all_outputs, all_registers,
-remove_from_collection. Anything else is an error rather than silently ignored.
+Supported commands: create_clock (several), set_input_delay / set_output_delay (-clock, -max,
+-min), set_driving_cell, set_load, set_false_path and set_multicycle_path (any of -from, one
+-through, -to; -setup / -hold for multicycle), set_clock_groups, set_clock_uncertainty, set and
+expr; object queries get_ports, get_cells, get_nets, get_clocks, all_inputs, all_outputs,
+all_registers, remove_from_collection. Anything else is an error rather than silently ignored.
 """
 from __future__ import annotations
 
@@ -28,8 +30,8 @@ from pathlib import Path
 
 
 def empty() -> dict:
-    return {"input_delay": {}, "output_delay": {}, "driver": {}, "output_load": {}, "false_from": set(),
-            "false_to": set(), "multicycle": {}, "uncertainty": (0.0, 0.0)}
+    return {"input_delay": {}, "output_delay": {}, "driver": {}, "output_load": {}, "clocks": {}, "input_clock": {},
+            "output_clock": {}, "clock_groups": [], "exceptions": [], "uncertainty": (0.0, 0.0)}
 
 
 def budget(net, delay_ns: float, driver: str, load_ff: float) -> dict:
@@ -47,9 +49,11 @@ def budget(net, delay_ns: float, driver: str, load_ff: float) -> dict:
 
 def summary(io: dict) -> dict:
     """JSON-friendly counts for the report."""
+    ex = io["exceptions"]
     return {"inputs_constrained": len(io["input_delay"]), "outputs_constrained": len(io["output_delay"]),
-            "false_from": len(io["false_from"]), "false_to": len(io["false_to"]),
-            "multicycle_endpoints": len(io["multicycle"]), "uncertainty_ns": list(io["uncertainty"])}
+            "clocks": {c: v["period"] for c, v in io["clocks"].items()}, "clock_groups": len(io["clock_groups"]),
+            "false_paths": sum(e["kind"] == "false" for e in ex), "multicycle_paths": sum(e["kind"] == "mcp" for e in ex),
+            "uncertainty_ns": list(io["uncertainty"])}
 
 
 # --- Tcl, the small part SDC files use -------------------------------------------------------
@@ -123,7 +127,7 @@ def _glob(pattern: str):
 class _Reader:
     def __init__(self, net, lib):
         self.net, self.lib, self.io, self.vars = net, lib, empty(), {}
-        self.period, self.clock_ports, self.unc = None, [], [0.0, 0.0]
+        self.clock_ports, self.unc = [], [0.0, 0.0]
         self.ffs = [c for c, (_, t) in enumerate(net.cells) if lib[t].ff]
 
     # word -> value: str, float or list of objects ("port", name) / ("cell", idx) / ("clock", name)
@@ -155,6 +159,8 @@ class _Reader:
             if isinstance(a, str) and a in flags:
                 o[a] = True
             elif isinstance(a, str) and a in keyed:
+                if a in o:   # e.g. two -through: an ordered sequence, not supported
+                    raise ValueError(f"SDC: {a} given twice")
                 o[a], i = args[i + 1], i + 1
             elif isinstance(a, str) and a.startswith("-") and not _is_num(a):
                 raise ValueError(f"SDC: unsupported option {a}")
@@ -163,7 +169,7 @@ class _Reader:
             i += 1
         return o, pos
 
-    def objs(self, v, kinds=("port", "cell")):
+    def objs(self, v, kinds=("port", "cell", "clock")):
         if isinstance(v, str):     # a bare name list means ports, as in SDC
             v = self.c_get_ports([v])
         bad = [o for o in v if o[0] not in kinds]
@@ -194,8 +200,32 @@ class _Reader:
             out += hit
         return out
 
+    def c_get_nets(self, args):
+        """Nets by RTL wire name (in_reg.a_q[3]); used for -through."""
+        out = []
+        for pat in " ".join(a for a in args if not a.startswith("-")).split():
+            rx = _glob(pat)
+            hit = [("net", n) for n, names in self.net.names.items() if any(rx.match(x) for x in names)]
+            if not hit:
+                raise ValueError(f"SDC: no net matches {pat!r}")
+            out += hit
+        return out
+
     def c_get_clocks(self, args):
-        return [("clock", a) for a in " ".join(args).split()]
+        out = []
+        for pat in " ".join(args).split():
+            hit = [("clock", c) for c in self.io["clocks"] if _glob(pat).match(c)]
+            if not hit:
+                raise ValueError(f"SDC: no clock matches {pat!r}")
+            out += hit
+        return out
+
+    def clock(self, v):
+        """A -clock argument: [get_clocks x] or a bare name."""
+        names = [c for _, c in self.objs(v, ("clock",))] if not isinstance(v, str) else v.split()
+        if len(names) != 1 or names[0] not in self.io["clocks"]:
+            raise ValueError(f"SDC: unknown clock {v!r}")
+        return names[0]
 
     def c_all_inputs(self, args):
         return [("port", p) for p, (d, _) in self.net.ports.items() if d == "input"]
@@ -221,16 +251,24 @@ class _Reader:
     # constraints
     def c_create_clock(self, args):
         o, pos = self.opts(args, keyed=("-period", "-name", "-waveform"))
-        self.period = float(o["-period"])
-        self.clock_ports = [p for _, p in self.objs(pos[0], ("port",))] if pos else []
-        return [("clock", o.get("-name", self.clock_ports[0] if self.clock_ports else "clk"))]
+        ports = [p for _, p in self.objs(pos[0], ("port",))] if pos else []
+        name = o.get("-name", ports[0] if ports else None)
+        if name is None:
+            raise ValueError("SDC: create_clock needs -name or a port")   # shortcut: no virtual clocks
+        wave = str(o.get("-waveform", "0")).split()
+        self.io["clocks"][name] = {"period": float(o["-period"]), "rise": float(wave[0]), "ports": ports}
+        self.clock_ports += ports
+        return [("clock", name)]
 
     def _delay(self, args, key):
         o, pos = self.opts(args, flags=("-max", "-min", "-add_delay"), keyed=("-clock",))
         d = float(pos[0])
+        clk = self.clock(o["-clock"]) if "-clock" in o else None
         for _, p in self.objs(pos[1], ("port",)):
             if p in self.clock_ports:
                 continue
+            if clk:
+                self.io["input_clock" if key == "input_delay" else "output_clock"][p] = clk
             mx, mn = self.io[key].get(p, (d, d))
             self.io[key][p] = (d if "-min" not in o else mx, d if "-max" not in o else mn)
 
@@ -252,25 +290,44 @@ class _Reader:
         for _, p in self.objs(pos[1], ("port",)):
             self.io["output_load"][p] = float(pos[0])
 
-    @staticmethod
-    def _key(o):
-        return o[1] if o[0] == "cell" else ("port", o[1])
+    def _exception(self, kind, o, **extra):
+        key = lambda x: x[1] if x[0] == "cell" else x       # flip-flops by index, ports and clocks as tuples
+        ex = {"kind": kind, "from": None, "through": None, "to": None} | extra
+        for side in ("from", "to"):
+            if f"-{side}" in o:
+                ex[side] = {key(x) for x in self.objs(o[f"-{side}"])}
+        if "-through" in o:
+            ex["through"] = {n for _, n in self.objs(o["-through"], ("net",))}
+        if ex["from"] is ex["through"] is ex["to"] is None:
+            raise ValueError(f"SDC: set_{'false' if kind == 'false' else 'multicycle'}_path needs -from, -through or -to")
+        self.io["exceptions"].append(ex)
 
     def c_set_false_path(self, args):
-        o, _ = self.opts(args, keyed=("-from", "-to"))
-        if ("-from" in o) == ("-to" in o):  # one arrival per net: -from A -to B would need path tags
-            raise ValueError("SDC: set_false_path needs exactly one of -from / -to")
-        side = "-from" if "-from" in o else "-to"
-        self.io["false_from" if side == "-from" else "false_to"] |= {self._key(x) for x in self.objs(o[side])}
+        o, _ = self.opts(args, keyed=("-from", "-to", "-through"))
+        self._exception("false", o)
 
     def c_set_multicycle_path(self, args):
-        o, pos = self.opts(args, flags=("-setup", "-hold", "-end"), keyed=("-to", "-from"))
-        if "-from" in o or "-to" not in o:
-            raise ValueError("SDC: set_multicycle_path supports -to only")
+        o, pos = self.opts(args, flags=("-setup", "-hold", "-end"), keyed=("-to", "-from", "-through"))
         n = int(float(pos[0]))
-        for x in self.objs(o["-to"]):
-            s, h = self.io["multicycle"].get(self._key(x), (1, 0))
-            self.io["multicycle"][self._key(x)] = (s, n) if "-hold" in o else (n, h)
+        self._exception("mcp", o, setup=None if "-hold" in o else n, hold=n if "-hold" in o else None)
+
+    def c_set_clock_groups(self, args):
+        groups, i = [], 0
+        while i < len(args):
+            a = args[i]
+            if a == "-group":
+                v = args[i + 1]
+                groups.append({self.clock(x) for x in (v.split() if isinstance(v, str) else [[o] for o in v])})
+                i += 2
+            elif a in ("-asynchronous", "-logically_exclusive", "-physically_exclusive"):
+                i += 1
+            elif a == "-name":
+                i += 2
+            else:
+                raise ValueError(f"SDC: unsupported set_clock_groups argument {a!r}")
+        if len(groups) < 2:
+            raise ValueError("SDC: set_clock_groups needs at least two -group")   # shortcut: no single-group form
+        self.io["clock_groups"].append(groups)
 
     def c_set_clock_uncertainty(self, args):
         o, pos = self.opts(args, flags=("-setup", "-hold"))
@@ -296,8 +353,13 @@ def _is_num(s):
 def read(src, net, lib) -> tuple[dict, float | None]:
     """Parse an SDC file (path) or script (str with newlines). Returns (io dict, clock period or None)."""
     text = src if isinstance(src, str) and "\n" in src else Path(src).read_text()
+    from chipflow.sta import clock_network
     r = _Reader(net, lib)
     for words in _words(text):
         r.run(words)
     r.io["uncertainty"] = tuple(r.unc)
-    return r.io, r.period
+    missing = clock_network(net, lib)[2] - set(r.clock_ports)
+    if r.io["clocks"] and missing:
+        raise ValueError(f"SDC: clock ports without create_clock: {sorted(missing)} (their flip-flops would go untimed)")
+    first = next(iter(r.io["clocks"].values()), None)
+    return r.io, first["period"] if first else None

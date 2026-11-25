@@ -118,18 +118,25 @@ class Table:
     v: list  # rows over x, columns over y
 
     def __call__(self, a: float, b: float = 0.0) -> float:
-        def seg(axis, q):
-            if len(axis) == 1:
-                return 0, 0, 0.0
-            i = min(max(bisect.bisect_right(axis, q) - 1, 0), len(axis) - 2)
-            return i, i + 1, (q - axis[i]) / (axis[i + 1] - axis[i])
-        i0, i1, tx = seg(self.x, a)
-        if not self.y or len(self.y) == 1:
-            return self.v[i0][0] + tx * (self.v[i1][0] - self.v[i0][0])
-        j0, j1, ty = seg(self.y, b)
-        v0 = self.v[i0][j0] + ty * (self.v[i0][j1] - self.v[i0][j0])
-        v1 = self.v[i1][j0] + ty * (self.v[i1][j1] - self.v[i1][j0])
-        return v0 + tx * (v1 - v0)
+        # the STA's innermost call (millions per run): inlined, no per-call closures
+        x, y, v = self.x, self.y, self.v
+        n = len(x) - 2
+        if n < 0:
+            i, tx = 0, 0.0
+        else:
+            i = bisect.bisect_right(x, a) - 1
+            i = 0 if i < 0 else n if i > n else i
+            tx = (a - x[i]) / (x[i + 1] - x[i])
+        r0 = v[i]
+        r1 = v[i + 1] if n >= 0 else r0
+        m = len(y) - 2
+        if m < 0:
+            return r0[0] + tx * (r1[0] - r0[0])
+        j = bisect.bisect_right(y, b) - 1
+        j = 0 if j < 0 else m if j > m else j
+        ty = (b - y[j]) / (y[j + 1] - y[j])
+        v0 = r0[j] + ty * (r0[j + 1] - r0[j])
+        return v0 + tx * (r1[j] + ty * (r1[j + 1] - r1[j]) - v0)
 
 
 @dc.dataclass
