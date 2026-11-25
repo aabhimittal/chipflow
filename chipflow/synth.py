@@ -19,7 +19,8 @@ class Netlist:
     ports: dict            # name -> (direction, [net ids])
     n_nets: int
     const: dict            # net id -> 0/1 for tie nets
-    io: dict | None = None # I/O constraints: input_delay, output_delay (ns), driver cell, output_load (fF)
+    io: dict | None = None # timing constraints in the form chipflow.sdc builds (per port, exceptions)
+    names: dict = dc.field(default_factory=dict)  # net id -> RTL wire names (e.g. "row[0].col[1].pe.acc[3]")
 
     def drivers_sinks(self, lib):
         """drv[net] = (cell, pin) or ('port', name, bit); sinks[net] = [(cell, pin) or ('port', name, bit)]."""
@@ -52,7 +53,7 @@ def synthesize(sources, top: str, params: dict | None = None, workdir: str | Pat
         "".join(f"read_verilog -sv {s}\n" for s in srcs) + chp +
         f"hierarchy -check -top {top}\nrename -top {top}\ncheck\n"   # chparam before hierarchy dodges a 0.71 assert
         f"synth -top {top}\ndfflibmap -liberty {lib}\nabc -liberty {lib}\n"
-        f"flatten\nopt_clean -purge\nsetundef -zero\nhilomap -singleton -hicell LOGIC1_X1 Z -locell LOGIC0_X1 Z\n"
+        f"flatten\nopt_clean\nsetundef -zero\nhilomap -singleton -hicell LOGIC1_X1 Z -locell LOGIC0_X1 Z\n"  # no -purge: SDC matches the RTL wire names
         f"stat -liberty {lib}\nwrite_json netlist.json\nwrite_verilog -noattr netlist.v\n")
     (wd / "synth.ys").write_text(script)
     r = subprocess.run(["yowasp-yosys", "-q", "-s", "synth.ys", "-l", "synth.log"], cwd=wd,
@@ -90,4 +91,10 @@ def load_json(path, top: str) -> Netlist:
         cells.append((name, c["type"]))
         pins.append({p: nid(bits[0]) for p, bits in c["connections"].items()})
     ports = {name: (p["direction"], [nid(b) for b in p["bits"]]) for name, p in m["ports"].items()}
-    return Netlist(top, cells, pins, ports, len(ids), const)
+    names: dict = {}
+    for w, v in m["netnames"].items():
+        if not v["hide_name"]:
+            for i, b in enumerate(v["bits"]):
+                if b not in ("0", "1", "x", "z") and b in ids:
+                    names.setdefault(ids[b], []).append(f"{w}[{i}]" if len(v["bits"]) > 1 else w)
+    return Netlist(top, cells, pins, ports, len(ids), const, names=names)

@@ -8,8 +8,10 @@ available (else its placed HPWL).
 
 Clock: ideal (zero latency) until the netlist has a clock tree; then it is propagated, so each
 flip-flop launches and captures at its own clock latency and skew enters setup and hold.
-Setup uses latest arrivals, hold earliest. Hold is checked register to register: input ports
-have no external timing, so paths from them are left out of hold.
+Setup uses latest arrivals, hold earliest. Constraints (net.io, see chipflow.sdc) give ports
+their delays, drivers and loads and add exceptions: false paths drop start or end points,
+multicycle paths move an endpoint's capture edge. Without constraints, inputs arrive ideally at
+time 0, outputs are checked against the full period, and ports are left out of hold.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from chipflow.sim import comb_order
 IN_SLEW, CLK_SLEW, OUT_LOAD_FF = 0.02, 0.02, 2.0   # ns, ns, fF
 MAX_SLEW = 0.198535                                 # Nangate45 default_max_transition, ns
 RF = ("r", "f")
+RISE = {"r": "rise", "f": "fall"}
 NEVER = 1e9
 
 
@@ -55,11 +58,15 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
         return pl.io[(p[1], p[2])] if p[0] == "port" else pl.pin_xy(p[0], p[1], macros, net.cells[p[0]][1])
 
     io = net.io
-    out_load = io["output_load"] if io else OUT_LOAD_FF
+    T = period_ns
+    out_load = (lambda name: io["output_load"].get(name, 0.0)) if io else (lambda name: OUT_LOAD_FF)
+    mcp = (lambda k: io["multicycle"].get(k, (1, 0))) if io else (lambda k: (1, 0))
+    false_from, false_to = (io["false_from"], io["false_to"]) if io else (set(), set())
+    unc_setup, unc_hold = io["uncertainty"] if io else (0.0, 0.0)
     load, wire = {}, {}
     for n in range(net.n_nets):
         pins = sinks[n]
-        cpin = sum(out_load if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap for p in pins)
+        cpin = sum(out_load(p[1]) if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap for p in pins)
         if pl is not None and n in drv and pins:
             pts = [xy(drv[n])] + [xy(p) for p in pins]
             length = net_len.get(n) if net_len and n in net_len else (
@@ -67,14 +74,15 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
             dx0, dy0 = pts[0]
             for p, (sx, sy) in zip(pins, pts[1:]):
                 d = abs(sx - dx0) + abs(sy - dy0)
-                cp = out_load if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap
+                cp = out_load(p[1]) if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap
                 wire[(n, p)] = r_um * d * (c_um * d / 2 + cp) * 1e-6  # ohm*fF = 1e-6 ns
         else:
             length = 0.0
         load[n] = cpin + c_um * length
 
     clk_cells, clk_nets, clk_roots = clock_network(net, lib, drv)
-    drv_arc = next(a for p in lib[io["driver"]].outputs() for a in p.arcs if a.kind.startswith("combinational")) if io else None
+    arc_of = {c: next(a for p in lib[c].outputs() for a in p.arcs if a.kind.startswith("combinational"))
+              for c in set(io["driver"].values())} if io else {}
     propagated = bool(clk_cells)
     order = comb_order(net, lib)
     ffs = [c for c, (_, t) in enumerate(net.cells) if lib[t].ff]
@@ -86,11 +94,16 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
             if d != "input":
                 continue
             for n in nets:
-                if io and name not in clk_roots:   # constrained input: input delay + driving cell into the net
-                    at[n] = {t: (io["input_delay"] + drv_arc.tables[f"cell_{'rise' if t == 'r' else 'fall'}"](IN_SLEW, load[n]),
-                                 drv_arc.tables[f"{'rise' if t == 'r' else 'fall'}_transition"](IN_SLEW, load[n]), None) for t in RF}
-                else:  # unconstrained: ideal driver at time 0; left out of hold (register to register only)
-                    at[n] = {t: (NEVER if early and name not in clk_roots else 0.0, IN_SLEW, None) for t in RF}
+                if name in clk_roots:
+                    at[n] = {t: (0.0, IN_SLEW, None) for t in RF}
+                elif not io:  # no constraints: ideal driver at time 0, left out of hold
+                    at[n] = {t: (NEVER if early else 0.0, IN_SLEW, None) for t in RF}
+                elif name not in io["input_delay"] or ("port", name) in false_from:  # not timed
+                    at[n] = {t: (NEVER if early else -NEVER, IN_SLEW, None) for t in RF}
+                else:  # input delay, then the driving cell into this net's load
+                    d, arc = io["input_delay"][name][1 if early else 0], arc_of.get(io["driver"].get(name))
+                    at[n] = {t: (d + (arc.tables[f"cell_{RISE[t]}"](IN_SLEW, load[n]) if arc else 0.0),
+                                 arc.tables[f"{RISE[t]}_transition"](IN_SLEW, load[n]) if arc else IN_SLEW, None) for t in RF}
         for n in net.const:
             at[n] = {t: (NEVER if early else 0.0, IN_SLEW, None) for t in RF}
 
@@ -137,6 +150,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
                     continue
                 arc = next(a for a in p.arcs if a.kind == "rising_edge")
                 L, s_ck = lat[c]
+                L = (NEVER if early else -NEVER) if c in false_from else L   # false path from this register
                 at[n] = {t: (L + arc.tables[f"cell_{'rise' if t == 'r' else 'fall'}"](s_ck, load[n]),
                              arc.tables[f"{'rise' if t == 'r' else 'fall'}_transition"](s_ck, load[n]),
                              ("launch", c, p.name)) for t in RF}
@@ -155,23 +169,30 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
         arc = next((a for a in cell.pins[dpin].arcs if a.kind == "setup_rising"), None)
         n = net.pins[c][dpin]
         L, s_ck = lat[c]
+        N = mcp(c)[0]
         for t in RF:
             a, s = sink_arrival(n, (c, dpin), t)
+            if c in false_to or a < -NEVER / 2:
+                continue
             su = arc.tables[f"{'rise' if t == 'r' else 'fall'}_constraint"](s, s_ck) if arc else 0.0
-            ends.append((period_ns + L - su - a, f"{inst}/{dpin}", n, t, (c, dpin)))
+            ends.append((N * T + L - su - a - unc_setup, f"{inst}/{dpin}", n, t, (c, dpin), N))
     for name, (d, nets) in net.ports.items():
-        if d == "output":
-            for b, n in enumerate(nets):
-                if n in at:
-                    for t in RF:
-                        a, _ = sink_arrival(n, ("port", name, b), t)
-                        ends.append((period_ns - (io["output_delay"] if io else 0.0) - a, f"{name}[{b}]", n, t, ("port", name, b)))
+        if d != "output" or ("port", name) in false_to or (io and name not in io["output_delay"]):
+            continue
+        N = mcp(("port", name))[0]
+        for b, n in enumerate(nets):
+            if n in at:
+                for t in RF:
+                    a, _ = sink_arrival(n, ("port", name, b), t)
+                    if a > -NEVER / 2:
+                        od = io["output_delay"][name][0] if io else 0.0
+                        ends.append((N * T - od - a - unc_setup, f"{name}[{b}]", n, t, ("port", name, b), N))
     ends.sort(key=lambda e: e[0])
 
     # backward pass: required times with the same delays as the forward pass -> slack on every net
     INF = float("inf")
     req = {n: {t: INF for t in RF} for n in at}
-    for sl, _, n, t, _ in ends:
+    for sl, _, n, t, *_ in ends:
         req[n][t] = min(req[n][t], sl + at[n][t][0])
     for c in reversed(order):
         cell = lib[net.cells[c][1]]
@@ -205,13 +226,23 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
         arc = next((a for a in cell.pins[dpin].arcs if a.kind == "hold_rising"), None)
         n = net.pins[c][dpin]
         L, s_ck = lat[c]
+        N, M = mcp(c)
         for t in RF:
             a, s = sink_e(n, (c, dpin), t)
-            if a >= NEVER / 2:
+            if a >= NEVER / 2 or c in false_to:
                 continue
             h = arc.tables[f"{'rise' if t == 'r' else 'fall'}_constraint"](s, s_ck) if arc else 0.0
-            hold.append((a - L - h, f"{inst}/{dpin}", c))
+            hold.append((a - L - h - (N - 1 - M) * T - unc_hold, f"{inst}/{dpin}", c))
     hold.sort()
+    port_hold = []  # outputs: the outside world holds for -min output delay after the edge
+    for name, (d, nets) in (net.ports.items() if io and sink_e else []):
+        if d != "output" or name not in io["output_delay"] or ("port", name) in false_to:
+            continue
+        N, M = mcp(("port", name))
+        for b, n in enumerate(nets):
+            a = min(sink_e(n, ("port", name, b), t)[0] for t in RF) if n in at_e else NEVER
+            if a < NEVER / 2:
+                port_hold.append(a + io["output_delay"][name][1] - (N - 1 - M) * T - unc_hold)
     hold_by_ff = {}
     for sl, _, c in hold:
         hold_by_ff.setdefault(c, sl)
@@ -220,8 +251,8 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
     for n, d in drv.items():
         if d[0] != "port":
             mc = lib[net.cells[d[0]][1]].pins[d[1]].max_cap
-        elif io and d[1] not in clk_roots:
-            mc = next(p.max_cap for p in lib[io["driver"]].outputs())
+        elif io and d[1] not in clk_roots and d[1] in io["driver"]:
+            mc = next(p.max_cap for p in lib[io["driver"][d[1]]].outputs())
         else:
             continue
         if load[n] > mc:
@@ -230,15 +261,18 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
     lats = [lat[c][0] for c in ffs]
 
     wns = ends[0][0] if ends else 0.0
+    t_req = max((T - e[0] / e[5] for e in ends), default=0.0)   # period at which each endpoint has zero slack
+    holds = [h[0] for h in hold] + port_hold
     path = _trace(net, at, wire, ends[0]) if ends else []
     worst_per_endpoint = {}
     for e in ends:  # sorted worst first: keep each endpoint's worse edge (rise or fall)
         worst_per_endpoint.setdefault(e[1], round(e[0], 4))
     return {"period_ns": period_ns, "wns_ns": round(wns, 4), "tns_ns": round(sum(min(0.0, e[0]) for e in ends), 3),
             "endpoints": len(ends) // 2, "failing_endpoints": len({e[1] for e in ends if e[0] < 0}),
-            "fmax_mhz": round(1000.0 / (period_ns - wns), 1) if period_ns - wns > 0 else None,
-            "whs_ns": round(hold[0][0], 4) if hold else None, "ths_ns": round(sum(min(0.0, s) for s in hold_by_ff.values()), 3),
-            "hold_failing": sum(s < 0 for s in hold_by_ff.values()),
+            "fmax_mhz": round(1000.0 / t_req, 1) if t_req > 0 else None,
+            "whs_ns": round(min(holds), 4) if holds else None,
+            "ths_ns": round(sum(min(0.0, s) for s in list(hold_by_ff.values()) + port_hold), 3),
+            "hold_failing": sum(s < 0 for s in hold_by_ff.values()) + sum(s < 0 for s in port_hold),
             "clock": {"propagated": propagated, "buffers": len(clk_cells),
                       "latency_ns": [round(min(lats), 4), round(max(lats), 4)] if lats else None,
                       "skew_ns": round(max(lats) - min(lats), 4) if lats else None},
@@ -251,7 +285,7 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
 
 def _trace(net, at, wire, end):
     """Walk predecessor pointers back from the worst endpoint."""
-    _, _, n, t, sink = end
+    _, _, n, t, sink, _ = end
     stages = []
     while True:
         a, _, pred = at[n][t]
