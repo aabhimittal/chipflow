@@ -109,9 +109,13 @@ def flow(a):
     t_pl = rep["repair"].pop("sta") if a.buffer else sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], hold=False)
     skew = a.useful_skew and a.cts
     if (a.size or skew) and t_pl["wns_ns"] < 0:   # setup repair: try sizing vs. useful skew + sizing, keep the cheaper
-        _, s_rep = simulate("after design-rule repair (activity for the repair's power estimate)")
-        cost = lambda: (power.analyze(net, lib, L["voltage"], a.clock_ns, s_rep.toggles, s_rep.cycles, 64)["total_mw"],
-                        sum(lib[t].area for _, t in net.cells))
+        act = []   # activity after design-rule repair, simulated once and only if two strategies are compared
+
+        def cost():
+            if not act:
+                act.append(simulate("after design-rule repair (activity for the repair's power estimate)")[1])
+            return (power.analyze(net, lib, L["voltage"], a.clock_ns, act[0].toggles, act[0].cycles, 64)["total_mw"],
+                    sum(lib[t].area for _, t in net.cells))
         rr, t_pl = size.close_setup(net, lib, lef, pl, a.clock_ns, cost, skew=skew, sizing=a.size, log=log)
         rep["timing_repair"] = {k: rr.pop(k) for k in ("chosen", "candidates")}
         rep |= rr   # the chosen strategy's "useful_skew" / "sizing" reports

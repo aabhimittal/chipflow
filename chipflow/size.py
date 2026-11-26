@@ -88,7 +88,7 @@ def close_setup(net, lib, lef, pl, period_ns, cost, skew=True, sizing=True, log=
         if sizing and (t is None or t["wns_ns"] < 0):
             r["sizing"] = upsize(net, lib, lef, pl, period_ns, log=log)
             t = r["sizing"].pop("sta")
-        mw, um2 = cost()
+        mw, um2 = cost() if len(plans) > 1 else (0.0, 0.0)   # one strategy: nothing to compare
         r["outcome"] = {"wns_ns": t["wns_ns"], "power_mw": mw, "area_um2": round(um2, 1)}
         runs[name] = (r, t, buffer.snapshot(net, pl))
         if log:

@@ -117,9 +117,9 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
       <div>
         <h3>Use it</h3>
         <ol>
-          <li><b>Pick a design</b> above the layout: the systolic array or the SIMT core.</li>
+          <li><b>Pick a design</b> above the layout: the systolic array at its default 2.0 ns clock, the same array pushed to 1.2 ns, or the SIMT core.</li>
           <li><b>Hover the layout</b> to identify any cell: its block, its cell type and whether it is on the critical path. On a phone, tap.</li>
-          <li><b>Color by</b> block (which PE or lane a cell belongs to) or by kind (flip-flop vs. logic gate).</li>
+          <li><b>Color by</b> block (which PE or lane a cell belongs to) or by kind (flip-flop, clock buffer, logic gate).</li>
           <li><b>Toggle overlays:</b> the critical path, routing congestion and the I/O pins on the die edge.</li>
           <li><b>Hover a row</b> in the critical-path table to find that gate on the layout.</li>
           <li><b>Open the Verilog</b> at the bottom to see the source the layout was built from.</li>
@@ -201,7 +201,7 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
   <footer>
     <div class="eyebrow">What this is and is not</div>
     <ul>
-      <li>Nangate45 is an open, purposely non-manufacturable 45 nm library. One typical timing corner, ideal clock (no clock tree yet), global routing only (no detailed routing), no DRC/LVS. Power excludes cell internal power.</li>
+      <li>Nangate45 is an open, purposely non-manufacturable 45 nm library. One typical timing corner, propagated clock through a synthesized clock tree, global routing only (no detailed routing), no DRC/LVS. Power excludes cell internal power.</li>
       <li>Source: <a href="https://github.com/aabhimittal/chipflow" target="_blank" rel="noopener">github.com/aabhimittal/chipflow</a>. Regenerate this page's data with <span class="mono">python demo/build_data.py</span>.</li>
     </ul>
   </footer>
@@ -223,7 +223,7 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
   const fmt = (v, k = 0) => Number(v).toLocaleString("en-US", { minimumFractionDigits: k, maximumFractionDigits: k });
 
   function init() {
-    $("#designSeg").innerHTML = D.designs.map((d, i) => '<button type="button" data-i="' + i + '">' + (d.key === "systolic" ? "Systolic array" : "SIMT core") + "</button>").join("");
+    $("#designSeg").innerHTML = D.designs.map((d, i) => '<button type="button" data-i="' + i + '">' + d.button + "</button>").join("");
     $("#designSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { S.d = +b.dataset.i; load(); } });
     $("#colorSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { S.color = b.dataset.color; press("#colorSeg", "color", S.color); base = null; draw(); legend(); } });
     ["#ovCrit", "#ovCong", "#ovIO"].forEach(id => $(id).addEventListener("change", () => { base = null; draw(); legend(); }));
@@ -253,7 +253,7 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
   const hue = (g, n) => "hsl(" + Math.round(360 * g / n) + " 55% 58%)";
   function cellColor(d, i) {
     const t = d.types[d.cells.t[i]];
-    if (S.color === "kind") return t.ff ? css("--accent") : t.name.startsWith("LOGIC") ? "#8a94a0" : "#5b7fb0";
+    if (S.color === "kind") return t.ff ? css("--accent") : t.name.startsWith("CLKBUF") ? "#c0392b" : t.name.startsWith("LOGIC") ? "#8a94a0" : "#5b7fb0";
     const g = d.cells.g[i];
     return d.groups[g] === "shared" ? "#8a94a0" : hue(g, d.groups.length);
   }
@@ -323,14 +323,14 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
     S.hover = hit; draw();
     if (hit < 0) { $("#readout").innerHTML = "x " + ux.toFixed(1) + " µm, y " + uy.toFixed(1) + " µm: empty site"; return; }
     const t = d.types[d.cells.t[hit]], k = d.critSet.get(hit);
-    $("#readout").innerHTML = "<b>" + d.groups[d.cells.g[hit]] + "</b> · <b>" + t.name + "</b> " + (t.ff ? "(flip-flop)" : "(logic)") +
+    $("#readout").innerHTML = "<b>" + d.groups[d.cells.g[hit]] + "</b> · <b>" + t.name + "</b> " + (t.ff ? "(flip-flop)" : t.name.startsWith("CLKBUF") ? "(clock buffer)" : "(logic)") +
       " · " + t.w.toFixed(2) + " µm wide · at (" + d.cells.x[hit].toFixed(1) + ", " + d.cells.y[hit].toFixed(1) + ") µm" +
       (k != null ? " · <b style=\"color:var(--crit)\">critical path stage " + (k + 1) + "</b>" : hit === d.critical.sink_idx ? " · <b style=\"color:var(--crit)\">captures the critical path</b>" : "");
   }
 
   function legend() {
     const d = des(); let h = "";
-    if (S.color === "kind") h += '<span><i class="sw" style="background:' + css("--accent") + '"></i>Flip-flop</span><span><i class="sw" style="background:#5b7fb0"></i>Logic gate</span><span><i class="sw" style="background:#8a94a0"></i>Tie cell</span>';
+    if (S.color === "kind") h += '<span><i class="sw" style="background:' + css("--accent") + '"></i>Flip-flop</span><span><i class="sw" style="background:#c0392b"></i>Clock buffer</span><span><i class="sw" style="background:#5b7fb0"></i>Logic gate</span><span><i class="sw" style="background:#8a94a0"></i>Tie cell</span>';
     else h += '<span>Color = block (' + (d.key === "systolic" ? "16 processing elements" : "4 lanes") + '); grey = shared logic</span>';
     if ($("#ovCrit").checked) h += '<span><i class="sw" style="background:' + css("--crit") + '"></i>Critical path, big dots = launch and capture</span>';
     if ($("#ovCong").checked) h += '<span><i class="sw" style="background:rgba(214,145,40,0.45)"></i>Routing &gt; 85% full</span><span><i class="sw" style="background:rgba(209,36,47,0.75)"></i>Over capacity</span>';
@@ -351,7 +351,8 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
       ["I/O budget", r.io ? fmt(100 * r.io.input_delay / d.clock_ns) + "% of the cycle each side, " + r.io.driver + " drivers" : "ports unconstrained"],
       ["fmax after routing", fmt(t.fmax_mhz, 1) + " MHz" + '<span class="pill ' + (t.wns_ns >= 0 ? "ok" : "warn") + '">' + (t.wns_ns >= 0 ? "meets clock" : "fails clock") + "</span>"],
       ["Worst slack (WNS)", (t.wns_ns >= 0 ? "+" : "") + t.wns_ns.toFixed(3) + " ns"],
-      ["Clock skew", t.clock && t.clock.propagated ? fmt(t.clock.skew_ns * 1000) + " ps over " + fmt(t.clock.buffers) + " clock buffers" : "ideal clock"],
+      ["Clock skew", t.clock && t.clock.propagated ? fmt(t.clock.skew_ns * 1000) + " ps over " + fmt(t.clock.buffers) + " clock buffers" + (r.useful_skew ? " (deliberate: useful skew)" : "") : "ideal clock"],
+      ["Setup repair", r.timing_repair ? "kept " + r.timing_repair.chosen.replace("+", " + ").replace("_", " ") + Object.entries(r.timing_repair.candidates).map(([k, c]) => '<span class="pill ' + (k === r.timing_repair.chosen ? "ok" : "") + '">' + k.replace("useful_skew+sizing", "skew + sizing") + ": " + (c.wns_ns >= 0 ? "+" : "") + c.wns_ns.toFixed(3) + " ns, " + fmt(c.power_mw, 2) + " mW</span>").join("") : "not needed: met after buffering"],
       ["Hold (worst slack)", t.whs_ns == null ? "–" : (t.whs_ns >= 0 ? "+" : "") + t.whs_ns.toFixed(3) + " ns" + '<span class="pill ' + (t.hold_failing ? "warn" : "ok") + '">' + (t.hold_failing ? t.hold_failing + " failing" : "met") + "</span>"],
       ["Routed wirelength", fmt(rt.wirelength_um / 1000, 1) + " mm"],
       ["Routing overflow", fmt(rt.overflow) + '<span class="pill ' + (rt.overflow ? "warn" : "ok") + '">' + (rt.overflow ? "congested" : "clean") + "</span>"],
@@ -407,7 +408,7 @@ footer ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
       ["Placement", "core " + r.place.core_um.map(x => fmt(x)).join(" × ") + " µm · HPWL " + fmt(r.place.hpwl_um / 1000, 1) + " mm" + (r.place.timing_driven_nets ? " · " + fmt(r.place.timing_driven_nets) + " timing-weighted nets" : ""),
         "Cells are pulled together by their wires and pushed apart like electric charges, then snapped into legal row sites. A second pass weights the nets near the critical slack so their cells sit closer (timing-driven placement)."],
       ["Clock tree + buffers", r.cts ? fmt(r.cts.buffers) + " clock buffers · " + fmt(r.repair.buffers) + " repair buffers" : "–",
-        "The clock fans out to every flip-flop through a balanced tree of clock buffers. Nets driving more than 16 pins get buffer trees, and drivers still too weak for their load are upsized. The netlist is then re-simulated to prove the logic did not change" + (r.verify_backend ? " (" + r.verify_backend.mismatches + " mismatches)." : ".")],
+        "The clock fans out to every flip-flop through a tree of clock buffers. Nets driving more than 16 pins get buffer trees, and drivers still too weak for their load are upsized. " + (r.useful_skew ? "Setup still failed, so the flow tried two fixes from the same state, gate sizing alone and useful skew plus sizing, and kept " + r.timing_repair.chosen.replace("useful_skew+sizing", "useful skew") + ": " + fmt(r.useful_skew.buffers) + " extra clock buffers delay the clock of flip-flops that capture slow paths, borrowing time from the faster paths they launch. " : "") + "The netlist is then re-simulated to prove the logic did not change" + (r.verify_backend ? " (" + r.verify_backend.mismatches + " mismatches)." : ".")],
       ["Timing", "fmax " + fmt(r.sta_placed.fmax_mhz, 1) + " MHz placed", "Static timing adds gate delays from the Liberty tables and wire delay from placed distances, with each flip-flop's own clock arrival from the tree. It checks setup on the slowest paths and hold on the fastest, then works backwards to give every net a slack. Gates on failing paths get upsized (X1 → X2 → X4)."],
       ["Routing", fmt(r.route.wirelength_um / 1000, 1) + " mm · overflow " + r.route.overflow + (r.route.routability_rounds ? " after " + r.route.routability_rounds + " re-placement round" : ""), "Every connection gets a path on a 2.8 µm tile grid; congested tiles get more expensive until nets negotiate detours. If some tiles stay over capacity, the cells there are inflated and re-placed."],
       ["Timing + power", "fmax " + fmt(r.sta_routed.fmax_mhz, 1) + " MHz · " + fmt(r.power.total_mw, 2) + " mW", "Timing is rerun on routed wire lengths; power uses the toggle rates measured in verification."],
