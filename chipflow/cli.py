@@ -107,14 +107,15 @@ def flow(a):
             f"{rep['repair']['violations_before']['slew']}/{rep['repair']['violations_before']['cap']} -> "
             f"{rep['repair']['violations_after']['slew']}/{rep['repair']['violations_after']['cap']}")
     t_pl = rep["repair"].pop("sta") if a.buffer else sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], hold=False)
-    if a.useful_skew and a.cts and t_pl["wns_ns"] < 0:  # borrow time through the clock before upsizing cells
-        rep["useful_skew"] = buffer.useful_skew(net, lib, lef, pl, a.clock_ns)
-        t_pl = rep["useful_skew"].pop("sta")
-        log(f"      useful skew: {rep['useful_skew']['buffers']} {rep['useful_skew']['cell']} on clock pins, "
-            f"WNS {rep['useful_skew']['wns_before_ns']:+.3f} -> {rep['useful_skew']['wns_after_ns']:+.3f} ns")
-    if a.size and t_pl["wns_ns"] < 0:
-        rep["sizing"] = size.upsize(net, lib, lef, pl, a.clock_ns, log=log)
-        log(f"      gate sizing: {rep['sizing']['cells_upsized']} cells upsized, WNS {rep['sizing']['wns_before_ns']:+.3f} -> {rep['sizing']['wns_after_ns']:+.3f} ns")
+    skew = a.useful_skew and a.cts
+    if (a.size or skew) and t_pl["wns_ns"] < 0:   # setup repair: try sizing vs. useful skew + sizing, keep the cheaper
+        _, s_rep = simulate("after design-rule repair (activity for the repair's power estimate)")
+        cost = lambda: (power.analyze(net, lib, L["voltage"], a.clock_ns, s_rep.toggles, s_rep.cycles, 64)["total_mw"],
+                        sum(lib[t].area for _, t in net.cells))
+        rr, t_pl = size.close_setup(net, lib, lef, pl, a.clock_ns, cost, skew=skew, sizing=a.size, log=log)
+        rep["timing_repair"] = {k: rr.pop(k) for k in ("chosen", "candidates")}
+        rep |= rr   # the chosen strategy's "useful_skew" / "sizing" reports
+        log(f"      setup repair: kept {rep['timing_repair']['chosen']}")
     if a.cts:
         rep["hold_fix"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns)
         log(f"      hold: worst slack {rep['hold_fix']['whs_after_ns']:+.3f} ns, {rep['hold_fix']['buffers']} delay buffers")
@@ -144,6 +145,7 @@ def flow(a):
     t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
     if a.size and t_rt["wns_ns"] < 0:  # post-route repair on routed lengths, then reroute the moved cells
         rep["sizing_post_route"] = size.upsize(net, lib, lef, pl, a.clock_ns, log=log, net_len=rt["net_len"])
+        rep["sizing_post_route"].pop("sta")
         rt = route.route(net, lib, pl, lef)
         rep["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
         t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])

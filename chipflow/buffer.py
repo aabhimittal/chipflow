@@ -72,6 +72,17 @@ def buffer_tree(net, lib, lef, pl, n, buf, cap, prefix) -> int:
     return added
 
 
+def snapshot(net, pl):
+    """Everything buffering and sizing change, so a trial can be undone exactly."""
+    return (list(net.cells), [dict(p) for p in net.pins], net.n_nets,
+            pl.x.copy(), pl.y.copy(), pl.w.copy(), pl.h.copy(), pl.flip.copy())
+
+
+def restore(net, pl, snap):
+    net.cells, net.pins, net.n_nets = list(snap[0]), [dict(p) for p in snap[1]], snap[2]
+    pl.x, pl.y, pl.w, pl.h, pl.flip = (a.copy() for a in snap[3:])
+
+
 def _legalize(pl, lef):
     centers = np.stack([pl.x + pl.w / 2, pl.y + pl.h / 2], 1)
     pl.x, pl.y, pl.flip = place.legalize(pl.core, lef, pl.w, pl.h, centers)
@@ -102,8 +113,9 @@ def repair_design(net, lib, lef, pl, period_ns, max_fanout=16, buf="BUF_X4", siz
                and sum(s[0] != "port" for s in sinks[n]) > max_fanout]
     added = sum(buffer_tree(net, lib, lef, pl, n, buf, max_fanout, "buf_") for n in targets)
     upsized = 0
+    tm = sta.Timer(net, lib, period_ns, pl, macros)     # after buffering; the rounds below only resize
     for _ in range(size_rounds):
-        t = sta.analyze(net, lib, period_ns, pl, macros, hold=False)
+        t = tm.report(hold=False)
         drv, _ = net.drivers_sinks(lib)
         cells = {drv[n][0] for n in t["slow_nets"] | t["cap_nets"] if n in drv and drv[n][0] != "port"}
         bump = [c for c in cells if _bigger(lib, net.cells[c][1])]
@@ -112,6 +124,7 @@ def repair_design(net, lib, lef, pl, period_ns, max_fanout=16, buf="BUF_X4", siz
         for c in bump:
             net.cells[c] = (net.cells[c][0], _bigger(lib, net.cells[c][1]))
             pl.w[c] = macros[net.cells[c][1]].width
+        tm.resize(bump)
         upsized += len(bump)
     _legalize(pl, lef)
     t = sta.analyze(net, lib, period_ns, pl, macros, hold=False)
@@ -173,7 +186,7 @@ def useful_skew(net, lib, lef, pl, period_ns, rounds=8, window=0.03, max_chain=6
                 plan[c] = k
         if not plan:
             break
-        saved = (list(net.cells), [dict(p) for p in net.pins], net.n_nets, pl.x, pl.y, pl.w, pl.h, pl.flip)
+        saved = snapshot(net, pl)
         for c, k in plan.items():
             ck = lib[net.cells[c][1]].ff["clock"]
             x, y = pl.pin_xy(c, ck, macros, net.cells[c][1])
@@ -184,8 +197,7 @@ def useful_skew(net, lib, lef, pl, period_ns, rounds=8, window=0.03, max_chain=6
         _legalize(pl, lef)
         t2 = sta.analyze(net, lib, period_ns, pl, macros, net_len)
         if t2["wns_ns"] <= t["wns_ns"] + 1e-4 or t2["hold_failing"] > t["hold_failing"]:
-            net.cells, net.pins, net.n_nets = saved[0], saved[1], saved[2]
-            pl.x, pl.y, pl.w, pl.h, pl.flip = saved[3:]
+            restore(net, pl, saved)
             break
         t, added, kept = t2, added + sum(plan.values()), kept + 1
     return {"buffers": added, "rounds_kept": kept, "wns_before_ns": wns0, "wns_after_ns": t["wns_ns"],

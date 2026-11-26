@@ -278,3 +278,48 @@ def test_useful_skew_borrows_time_through_the_clock(lib, tmp_path):
     snap = (list(net.cells), net.n_nets, pl.x.copy())            # converged: another call keeps nothing it cannot gain
     again = buffer.useful_skew(net, lib, lef, pl, T, rounds=1)
     assert again["rounds_kept"] == 1 or (net.cells == snap[0] and net.n_nets == snap[1] and np.array_equal(pl.x, snap[2]))
+
+
+def test_setup_repair_keeps_the_better_strategy(lib, tmp_path):
+    from chipflow import buffer
+    p = {"N": 2, "REG_IN": 1}
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", p, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    net.io = sdc.budget(net, 0.4, "BUF_X4", 4.0)
+    buffer.cts(net, lib, lef, pl)
+    T = 1.3
+    area = lambda: sum(lib[t].area for _, t in net.cells)
+    cost = lambda: (area() / 1000, area())        # any monotone stand-in for power: the rule is what is tested
+    r, t = size.close_setup(net, lib, lef, pl, T, cost)
+    c = r["candidates"]
+    assert set(c) == {"sizing", "useful_skew+sizing"}
+    best = max(c, key=lambda k: (min(c[k]["wns_ns"], 0.0), -c[k]["power_mw"], -c[k]["area_um2"]))
+    assert r["chosen"] == best
+    assert sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"] == t["wns_ns"] == c[best]["wns_ns"]
+    assert area() == pytest.approx(c[best]["area_um2"], abs=0.1)              # the kept state is the chosen one
+    assert ("useful_skew" in r) == (best == "useful_skew+sizing")
+    assert designs.systolic_tb(sim.Simulator(net, lib), p, np.random.default_rng(0))["mismatches"] == 0
+
+
+def test_incremental_resize_matches_full_timing(lib, tmp_path):
+    import random
+    from chipflow import buffer
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", {"N": 2, "REG_IN": 1}, tmp_path)
+    lef = pdk.load_lef()
+    m = lef["macros"]
+    net.io = sdc.budget(net, 0.4, "BUF_X4", 4.0)
+    pl = place.place(net, lib, lef)
+    buffer.cts(net, lib, lef, pl)               # so flip-flop resizes move clock latencies too
+    tm = sta.Timer(net, lib, 1.4, pl, m)
+    rng = random.Random(0)
+    keys = ("wns_ns", "tns_ns", "fmax_mhz", "slack_by_endpoint", "net_slack", "critical_path", "slow_nets", "cap_nets", "clock")
+    for k in (1, 7, 60, 300):
+        batch = rng.sample([c for c, (_, t) in enumerate(net.cells) if size._bigger(lib, t)], k)
+        assert any(lib[net.cells[c][1]].ff for c in batch) or k < 60
+        for c in batch:
+            net.cells[c] = (net.cells[c][0], size._bigger(lib, net.cells[c][1]))
+            pl.w[c] = m[net.cells[c][1]].width
+        tm.resize(batch)
+        a, b = tm.report(hold=False), sta.Timer(net, lib, 1.4, pl, m).report(hold=False)
+        assert all(a[x] == b[x] for x in keys), [x for x in keys if a[x] != b[x]]
