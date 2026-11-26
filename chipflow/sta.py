@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import types
 
 from chipflow import pdk
 from chipflow.sim import comb_order
@@ -117,42 +118,14 @@ def _arcs(net, lib, cells):
     return out
 
 
-def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold=True) -> dict:
-    """hold=False skips the earliest-arrival pass (inner loops that only need setup)."""
-    drv, sinks = net.drivers_sinks(lib)
-    r_um, c_um = pdk.WIRE_R_OHM_UM, pdk.WIRE_C_FF_UM
-
-    def xy(p):
-        if pl is None:
-            return 0.0, 0.0
-        return pl.io[(p[1], p[2])] if p[0] == "port" else pl.pin_xy(p[0], p[1], macros, net.cells[p[0]][1])
-
+def _context(net, lib, period_ns, drv):
+    """Clocks, path tags and exception checks shared by both timing engines."""
     io = net.io
-    out_load = (lambda name: io["output_load"].get(name, 0.0)) if io else (lambda name: OUT_LOAD_FF)
-    unc_setup, unc_hold = io["uncertainty"] if io else (0.0, 0.0)
-    load, wire = {}, {}
-    for n in range(net.n_nets):
-        pins = sinks[n]
-        cpin = sum(out_load(p[1]) if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap for p in pins)
-        if pl is not None and n in drv and pins:
-            pts = [xy(drv[n])] + [xy(p) for p in pins]
-            length = net_len.get(n) if net_len and n in net_len else (
-                max(a for a, _ in pts) - min(a for a, _ in pts) + max(b for _, b in pts) - min(b for _, b in pts))
-            dx0, dy0 = pts[0]
-            for p, (sx, sy) in zip(pins, pts[1:]):
-                d = abs(sx - dx0) + abs(sy - dy0)
-                cp = out_load(p[1]) if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap
-                wire[(n, p)] = r_um * d * (c_um * d / 2 + cp) * 1e-6  # ohm*fF = 1e-6 ns
-        else:
-            length = 0.0
-        load[n] = cpin + c_um * length
-
     clk_cells, clk_nets, clk_roots = clock_network(net, lib, drv)
     arc_of = {c: next(a for p in lib[c].outputs() for a in p.arcs if a.kind.startswith("combinational"))
               for c in set(io["driver"].values())} if io else {}
     propagated = bool(clk_cells)
     order = comb_order(net, lib)
-    arcs = _arcs(net, lib, order)
     ffs = [c for c, (_, t) in enumerate(net.cells) if lib[t].ff]
 
     # clocks: name -> (period, rise), scaled so the first clock has period_ns (--clock-ns scales them all)
@@ -233,6 +206,47 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
             M = ex["hold"] if ex.get("hold") is not None else M
         return N, M
 
+    return types.SimpleNamespace(clk_cells=clk_cells, clk_nets=clk_nets, clk_roots=clk_roots, arc_of=arc_of, propagated=propagated, order=order, ffs=ffs, clocks=clocks, primary=primary, clock_of_port=clock_of_port, rel=rel, ff_clock=ff_clock, groups=groups, exs=exs, thr_of=thr_of, from_ex=from_ex, tags=tags, intern=intern, start_tag=start_tag, bump=bump, check=check)
+
+
+def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold=True, engine="auto") -> dict:
+    """hold=False skips the earliest-arrival pass (inner loops that only need setup). engine: "auto"
+    uses the vectorized engine (chipflow.sta_vec) unless -through exceptions need path tags created
+    on the way; "py" forces this one (the reference the vector engine is tested against)."""
+    if engine == "vec" or (engine == "auto" and not any((ex.get("through") for ex in (net.io or {}).get("exceptions", [])))):
+        from chipflow import sta_vec
+        return sta_vec.analyze(net, lib, period_ns, pl, macros, net_len, hold)
+    drv, sinks = net.drivers_sinks(lib)
+    r_um, c_um = pdk.WIRE_R_OHM_UM, pdk.WIRE_C_FF_UM
+
+    def xy(p):
+        if pl is None:
+            return 0.0, 0.0
+        return pl.io[(p[1], p[2])] if p[0] == "port" else pl.pin_xy(p[0], p[1], macros, net.cells[p[0]][1])
+
+    io = net.io
+    out_load = (lambda name: io["output_load"].get(name, 0.0)) if io else (lambda name: OUT_LOAD_FF)
+    unc_setup, unc_hold = io["uncertainty"] if io else (0.0, 0.0)
+    load, wire = {}, {}
+    for n in range(net.n_nets):
+        pins = sinks[n]
+        cpin = sum(out_load(p[1]) if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap for p in pins)
+        if pl is not None and n in drv and pins:
+            pts = [xy(drv[n])] + [xy(p) for p in pins]
+            length = net_len.get(n) if net_len and n in net_len else (
+                max(a for a, _ in pts) - min(a for a, _ in pts) + max(b for _, b in pts) - min(b for _, b in pts))
+            dx0, dy0 = pts[0]
+            for p, (sx, sy) in zip(pins, pts[1:]):
+                d = abs(sx - dx0) + abs(sy - dy0)
+                cp = out_load(p[1]) if p[0] == "port" else lib[net.cells[p[0]][1]].pins[p[1]].cap
+                wire[(n, p)] = r_um * d * (c_um * d / 2 + cp) * 1e-6  # ohm*fF = 1e-6 ns
+        else:
+            length = 0.0
+        load[n] = cpin + c_um * length
+
+    cx = _context(net, lib, period_ns, drv)
+    (clk_cells, clk_nets, clk_roots, arc_of, propagated, order, arcs, ffs, clocks, primary, clock_of_port, rel, ff_clock, groups, exs, thr_of, from_ex, tags, intern, start_tag, bump, check) = (
+        cx.clk_cells, cx.clk_nets, cx.clk_roots, cx.arc_of, cx.propagated, cx.order, _arcs(net, lib, cx.order), cx.ffs, cx.clocks, cx.primary, cx.clock_of_port, cx.rel, cx.ff_clock, cx.groups, cx.exs, cx.thr_of, cx.from_ex, cx.tags, cx.intern, cx.start_tag, cx.bump, cx.check)
     dcache = {}
 
     def forward(early: bool):
