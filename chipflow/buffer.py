@@ -2,7 +2,9 @@
 
 - clock-tree synthesis: the flip-flop clock pins of each clock get a balanced tree of clock buffers;
 - design-rule repair: nets driving more than `max_fanout` pins get a tree of buffers;
-- hold fixing: a delay buffer goes in front of each flip-flop whose data arrives too early.
+- hold fixing: a delay buffer goes in front of each flip-flop whose data arrives too early;
+- useful skew: clock buffers in front of flip-flops that capture critical paths, so their clock
+  edge comes later and borrows time from the (slacker) paths they launch.
 
 Trees are built bottom up: sinks are split by recursive median bisection along the wider spread
 until each group has at most `cap` pins, a buffer drives each group from its centroid, and the
@@ -11,11 +13,14 @@ New cells are appended to the netlist and placement, then the whole design is re
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from chipflow import place, sta
 
 HOLD_MARGIN = 0.01  # ns: hold target, so routing's small arrival shifts do not tip flip-flops below zero
+SKEW_UNIT = 0.025   # ns: about one CLKBUF_X1 driving a single clock pin
 
 
 def _clusters(pts, idx, cap):
@@ -111,7 +116,8 @@ def repair_design(net, lib, lef, pl, period_ns, max_fanout=16, buf="BUF_X4", siz
     _legalize(pl, lef)
     t = sta.analyze(net, lib, period_ns, pl, macros, hold=False)
     return {"nets_buffered": len(targets), "buffers": added, "drivers_upsized": upsized, "max_fanout": max_fanout,
-            "cell": buf, "violations_before": before, "violations_after": {"slew": t["slew_violations"], "cap": t["cap_violations"]}}
+            "cell": buf, "violations_before": before, "violations_after": {"slew": t["slew_violations"], "cap": t["cap_violations"]},
+            "sta": t}   # final setup timing, so the caller need not re-time
 
 
 def fix_hold(net, lib, lef, pl, period_ns, buf="BUF_X1", rounds=4, setup_margin=0.05, net_len=None) -> dict:
@@ -138,5 +144,49 @@ def fix_hold(net, lib, lef, pl, period_ns, buf="BUF_X1", rounds=4, setup_margin=
                 added += 1
         _legalize(pl, lef)
         t = sta.analyze(net, lib, period_ns, pl, macros, net_len)
-    return {"buffers": added, "whs_before_ns": start, "whs_after_ns": t["whs_ns"], "hold_failing": t["hold_failing"]}
+    return {"buffers": added, "whs_before_ns": start, "whs_after_ns": t["whs_ns"], "hold_failing": t["hold_failing"], "sta": t}
 
+
+
+def useful_skew(net, lib, lef, pl, period_ns, rounds=8, window=0.03, max_chain=6, buf="CLKBUF_X1", net_len=None) -> dict:
+    """Delay the clock of flip-flops capturing near-critical paths, by half the gap between the
+    slack of the paths they capture and the paths they launch (capture gains d, launch loses d).
+    Each round adds buffer chains to every flip-flop within `window` of WNS, and is kept only if
+    WNS improves without new hold failures; otherwise netlist and placement are restored."""
+    macros = lef["macros"]
+    t = sta.analyze(net, lib, period_ns, pl, macros, net_len)
+    wns0, added, kept = t["wns_ns"], 0, 0
+    for _ in range(rounds):
+        if t["wns_ns"] >= 0:   # met: more skew only costs clock power and hold margin
+            break
+        sbe, ns = t["slack_by_endpoint"], t["net_slack"]
+        plan = {}
+        for c, (inst, typ) in enumerate(net.cells):
+            cell = lib[typ]
+            sd = sbe.get(f"{inst}/{cell.ff['next']}") if cell.ff else None
+            if sd is None or sd > t["wns_ns"] + window:
+                continue
+            # paths it launches; a self-loop is counted too though skew cannot change it (conservative)
+            sq = min((ns.get(net.pins[c][p.name], math.inf) for p in cell.outputs() if p.name in net.pins[c]), default=math.inf)
+            k = min(max_chain, int((sq - sd) / 2 / SKEW_UNIT))
+            if k > 0:
+                plan[c] = k
+        if not plan:
+            break
+        saved = (list(net.cells), [dict(p) for p in net.pins], net.n_nets, pl.x, pl.y, pl.w, pl.h, pl.flip)
+        for c, k in plan.items():
+            ck = lib[net.cells[c][1]].ff["clock"]
+            x, y = pl.pin_xy(c, ck, macros, net.cells[c][1])
+            for _ in range(k):
+                out = _new_net(net)
+                _add_cell(net, pl, lef, f"skew_{len(net.cells)}", buf, {"A": net.pins[c][ck], "Z": out}, x, y)
+                net.pins[c][ck] = out
+        _legalize(pl, lef)
+        t2 = sta.analyze(net, lib, period_ns, pl, macros, net_len)
+        if t2["wns_ns"] <= t["wns_ns"] + 1e-4 or t2["hold_failing"] > t["hold_failing"]:
+            net.cells, net.pins, net.n_nets = saved[0], saved[1], saved[2]
+            pl.x, pl.y, pl.w, pl.h, pl.flip = saved[3:]
+            break
+        t, added, kept = t2, added + sum(plan.values()), kept + 1
+    return {"buffers": added, "rounds_kept": kept, "wns_before_ns": wns0, "wns_after_ns": t["wns_ns"],
+            "skew_ns": t["clock"]["skew_ns"], "cell": buf, "sta": t}

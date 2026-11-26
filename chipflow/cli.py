@@ -106,14 +106,19 @@ def flow(a):
             f"{rep['repair']['drivers_upsized']} drivers upsized; slew/cap violations "
             f"{rep['repair']['violations_before']['slew']}/{rep['repair']['violations_before']['cap']} -> "
             f"{rep['repair']['violations_after']['slew']}/{rep['repair']['violations_after']['cap']}")
-    t_pl = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], hold=False)
+    t_pl = rep["repair"].pop("sta") if a.buffer else sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], hold=False)
+    if a.useful_skew and a.cts and t_pl["wns_ns"] < 0:  # borrow time through the clock before upsizing cells
+        rep["useful_skew"] = buffer.useful_skew(net, lib, lef, pl, a.clock_ns)
+        t_pl = rep["useful_skew"].pop("sta")
+        log(f"      useful skew: {rep['useful_skew']['buffers']} {rep['useful_skew']['cell']} on clock pins, "
+            f"WNS {rep['useful_skew']['wns_before_ns']:+.3f} -> {rep['useful_skew']['wns_after_ns']:+.3f} ns")
     if a.size and t_pl["wns_ns"] < 0:
         rep["sizing"] = size.upsize(net, lib, lef, pl, a.clock_ns, log=log)
         log(f"      gate sizing: {rep['sizing']['cells_upsized']} cells upsized, WNS {rep['sizing']['wns_before_ns']:+.3f} -> {rep['sizing']['wns_after_ns']:+.3f} ns")
     if a.cts:
         rep["hold_fix"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns)
         log(f"      hold: worst slack {rep['hold_fix']['whs_after_ns']:+.3f} ns, {rep['hold_fix']['buffers']} delay buffers")
-    t_pl = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"])
+    t_pl = rep["hold_fix"].pop("sta") if a.cts else sta.analyze(net, lib, a.clock_ns, pl, lef["macros"])
     rep["sta_placed"] = _summary(t_pl)
     log(f"      WNS {t_pl['wns_ns']:+.3f} ns, fmax {t_pl['fmax_mhz']} MHz, skew {t_pl['clock']['skew_ns']} ns")
     rep["verify_backend"], s = simulate("re-verified after clock tree, buffering and sizing")
@@ -145,6 +150,7 @@ def flow(a):
         log(f"      post-route sizing: {rep['sizing_post_route']['cells_upsized']} cells, rerouted overflow {rt['overflow']}")
     if a.cts and t_rt["hold_failing"]:  # post-route hold repair on routed lengths, then reroute
         rep["hold_fix_post_route"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns, net_len=rt["net_len"])
+        rep["hold_fix_post_route"].pop("sta")
         rt = route.route(net, lib, pl, lef)
         rep["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
         t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
@@ -186,6 +192,8 @@ def main(argv=None):
     f.add_argument("--timing-driven", action=argparse.BooleanOptionalAction, default=True, help="re-place with critical nets weighted")
     f.add_argument("--size", action=argparse.BooleanOptionalAction, default=True, help="upsize cells when timing fails")
     f.add_argument("--cts", action=argparse.BooleanOptionalAction, default=True, help="build a clock tree, check and fix hold")
+    f.add_argument("--useful-skew", action=argparse.BooleanOptionalAction, default=True,
+                   help="when setup fails, delay capture clocks of critical flip-flops (before sizing)")
     f.add_argument("--io", action=argparse.BooleanOptionalAction, default=True, help="time ports with I/O constraints")
     f.add_argument("--io-budget", type=float, default=0.3, help="input and output delay as a fraction of the clock period")
     f.add_argument("--input-driver", default="BUF_X4", help="library cell assumed to drive each input port")
