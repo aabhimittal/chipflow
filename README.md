@@ -19,7 +19,7 @@ Verilog ─► lint + synthesis ─► gate-level simulation ─► floorplan �
 | Floorplan + placement | back | Core sized for a target utilization; global placement minimizes weighted-average wirelength plus an electrostatic density energy (FFT Poisson solve); a gap-filling legalizer snaps cells to rows and sites. **Timing-driven**: near-critical nets are weighted and the design re-placed. **Routability-driven**: cells in congested gcells are inflated and re-placed until routing overflow clears | `place.py` |
 | Static timing | back | Rise/fall propagation with unateness through Liberty NLDM delay and slew tables; Elmore wire delay from placed or routed lengths; propagated clock through the clock tree (latency and skew per flip-flop); setup on latest arrivals, hold on earliest; slew and capacitance limit checks; backward required-time pass for slack on every net; critical path trace. **Path tags**: arrivals are kept per (launch clock, `-from` matches, `-through` crossings), so exceptions are exact per path. **Several clocks**: launch/capture use the most restrictive edge pair over the clocks' common period, hold derives from it, as SDC defines | `sta.py` |
 | Constraints (SDC) | back | Reads the everyday SDC subset: `create_clock` (several, with `-waveform`), per-port `set_input_delay` / `set_output_delay` (`-clock`, `-max` / `-min`), `set_driving_cell`, `set_load`, `set_false_path` and `set_multicycle_path` with any of `-from` / `-through` / `-to` (multicycle with SDC's hold-edge rule), `set_clock_groups`, `set_clock_uncertainty`, `set` / `expr`, and `get_ports` / `get_cells` / `get_nets` / `get_clocks` / `all_*` queries. `get_cells` matches flip-flops by their RTL register name (`row[0].col[1].pe.acc[3]`). Unsupported commands are errors, not silently dropped. Without a file, the default is a budget: inputs arrive at `io-budget` × period through a `BUF_X4`, outputs must be ready as early into 4 fF. Port paths are timed for setup and hold and port nets are buffered like internal ones | `sdc.py`, `sta.py` |
-| Clock tree + buffers | back | Clock-tree synthesis: each clock's flip-flops are split by recursive median bisection into groups of ≤ 16 under a `CLKBUF_X3`, level by level up to the clock pin. Design-rule repair: nets driving > 16 pins get a `BUF_X4` tree, then drivers still over the slew or capacitance limit are upsized. Hold fixing: `BUF_X1` delay cells in front of flip-flops whose data arrives too early, where setup slack allows. **Useful skew** (when setup fails, before sizing): `CLKBUF_X1` chains on the clock pins of flip-flops capturing near-critical paths, worth half the gap between their capture and launch slack; a round is kept only if WNS improves with no new hold failures, and it stops once setup is met | `buffer.py` |
+| Clock tree + buffers | back | Clock-tree synthesis: each clock's flip-flops are split by recursive median bisection into groups of ≤ 16 under a `CLKBUF_X3`, level by level up to the clock pin. Design-rule repair: nets driving > 16 pins get a `BUF_X4` tree, then drivers still over the slew or capacitance limit are upsized. Hold fixing: `BUF_X1` delay cells in front of flip-flops whose data arrives too early, where setup slack allows. **Useful skew** (when setup fails, before sizing): `CLKBUF_X1` chains on the clock pins of flip-flops capturing near-critical paths, worth half the gap between their capture and launch slack; a round is kept only if WNS improves with no new hold failures, and it stops once setup is met. **Setup repair picks its strategy by outcome**: gate sizing alone and useful skew + sizing both run from the same snapshot; the better WNS wins, and when both meet timing, the lower estimated power, then area | `buffer.py`, `size.py` |
 | Timing repair | back | Gate sizing: worst-slack cells move up the library's drive strengths (X1 → X2 → X4…) in batches kept only if WNS improves; runs after buffering and again on routed lengths | `size.py` |
 | Global routing | back | Gcell grid with track capacities from metal2–6 pitches; MST net decomposition; L-shape initial routes; negotiated rip-up and reroute (PathFinder) with A* | `route.py` |
 | Power | back | Switching power from simulated toggle rates on routed net capacitance, clock-tree power (every clock net switches twice a cycle), Liberty leakage | `power.py` |
@@ -76,7 +76,7 @@ times at 625 MHz instead of 645: the uncertainty alone, as 1.549 + 0.050 ns = 1.
 | Routed fmax at 2.0 / 3.0 ns | **645 MHz** | **503 MHz** |
 | Hold, worst slack | +0.133 ns, no delay buffers needed | +0.115 ns, none needed |
 | Tightest clock met after routing | **1.2 ns (834 MHz)**: useful skew (1,020 clock buffers) + 432 cells upsized. Sizing alone: 1.4 ns (715 MHz) | **1.9 ns (528 MHz)**; misses 1.8 ns by 2 ps |
-| At 1.4 / 1.9 ns: useful skew vs. sizing only | 450 clock buffers (+359 µm², 6.21 mW) vs. 1,100 cells upsized (+806 µm², 6.11 mW) | 858 buffers + 147 upsized (~700 µm², 8.95 mW) vs. 254 upsized (+217 µm², 7.75 mW): `--no-useful-skew` is cheaper here |
+| Setup repair the flow keeps at 1.4 / 1.9 ns | useful skew: 450 clock buffers (+359 µm²) instead of 1,100 cells upsized (+806 µm²); estimated power a tie | sizing: 254 upsized, 7.75 mW, instead of skew + sizing at 8.95 mW |
 | Critical path | 29 stages, register → signed multiplier → adder → accumulator | 33 stages, issue register → buffer trees → decode → register-file read → ALU |
 | Power at the target clock | 4.18 mW | 5.00 mW |
 | Runtime, whole flow | 20 s | 52 s |
@@ -131,6 +131,13 @@ Red is the post-route critical path.
   backward pass cut profiled time 22%, but the unprofiled run moved 5%. Profiling taxes every
   Python call, so call-heavy code looks worse than it is; per-stage wall-clock timing showed the
   real split (above) and is what the roadmap now follows.
+- **Incremental timing that was correct and still not faster.** A `Timer` that re-evaluates only
+  cells whose inputs changed after a resize matched full analysis bit for bit on randomized
+  resizes (including flip-flops, whose clock-pin load moves clock latencies), and later sizing
+  rounds touched only 4-24% of the design. Gate sizing still took the same time (4×4: 6.3 vs
+  5.9 s; 8×8: 21.1 vs 21.7 s): each round still recomputes required times and endpoints over
+  the whole design, a rejected batch costs a second update, and sizing converges in ~9 rounds.
+  The code was removed.
 - **Useful skew that overshot.** Rounds kept adding clock buffers after setup was already met:
   SIMT at 1.9 ns needed 89 ps and got 138 ps, for 1,212 buffers. Stopping at WNS ≥ 0, as sizing
   does, cut that to 858 and systolic at 1.4 ns from 984 to 450.
@@ -153,8 +160,10 @@ Red is the post-route critical path.
   path's slack by −(capture − launch), it cannot raise WNS above the current critical path's
   slack minus that term: balancing can only lose here. Useful skew, the opposite of balancing,
   is built; it helps where critical paths feed slacker ones (systolic: +17% tightest clock) and
-  barely where pipeline stages are balanced (SIMT: under 1%, at 15% more power), so it is on by
-  default but `--no-useful-skew` is the cheaper choice for designs like SIMT.
+  barely where pipeline stages are balanced (SIMT: under 1%, at 15% more power). The flow runs
+  both repairs and keeps the cheaper, so each design gets the right one without a switch. The
+  choice is made before routing: at SIMT's 1.8 ns both strategies met timing there, sizing won on
+  power, and it then failed by 35 ps after routing where useful skew had failed by 2 ps.
 - **SDC subset.** One `-through` per exception (an ordered sequence is rejected); overlapping
   exceptions resolve by definition order, not SDC's specificity rules; no generated or virtual
   clocks, and only rising-edge flip-flops. `get_ports` takes whole buses (`a_west`, not
@@ -167,14 +176,14 @@ Red is the post-route critical path.
   reference tool.
 - **Single-threaded Python** for the router, STA and legalizer; placement uses PyTorch on CPU. On the
   8×8 array (51k cells, 66 s) the time is spread: placement 31%, design-rule repair 26% (four full
-  timing runs), routing 19%. One timing run is ~4 s, 60% of it in the two forward passes. The
-  next real speed-up is incremental or levelized/vectorized timing, not the router.
+  timing runs), routing 19%. One timing run is ~4 s, 60% of it in the two forward passes.
+  Incremental timing was built and measured, and did not pay (see above); the next speed-up to
+  try is a levelized, vectorized timer.
 
 ## Roadmap
 
-1. Incremental timing (re-time only the fan-out cone of an edit), then a levelized numpy timer:
-   repair, sizing and useful skew re-time the whole design after every local change.
-2. Useful skew that weighs its cost against sizing per round, instead of a per-design switch.
+1. A levelized numpy timer: one vectorized pass per logic level instead of a Python loop per arc.
+2. Repair choices judged after routing (or with a routed-length estimate), not on placed lengths.
 3. Differentiable STA: slack gradients straight into placement, replacing net weights.
 4. Track assignment, then detailed routing.
 5. GPU kernels for placement density, STA propagation and routing cost updates, for designs
