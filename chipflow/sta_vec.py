@@ -48,7 +48,8 @@ def _interp(X, Y, V, tid, a, b):
     return v0 + tx * (r1j + ty * (r1j1 - r1j) - v0)
 
 
-def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold=True) -> dict:
+def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold=True, graph=False) -> dict:
+    """graph=True adds the levelized graph and operating point under "_graph" (for chipflow.place)."""
     tab_id, X, Y, V = _pack(lib)
     drv, sinks = net.drivers_sinks(lib)
     cx = _context(net, lib, period_ns, drv)
@@ -439,7 +440,13 @@ def analyze(net, lib, period_ns: float, pl=None, macros=None, net_len=None, hold
     worst = {}
     for e in ends:
         worst.setdefault(e[1], round(e[0], 4))
-    return {"period_ns": period_ns, "wns_ns": round(wns, 4), "tns_ns": round(sum(min(0.0, s) for s in worst.values()), 3),
+    extra = {}
+    if graph:
+        extra["_graph"] = {"cell": ccell, "nin": nin, "nout": nout, "tin": tin, "tout": tout, "rel": rel, "rel_names": rel_names,
+                           "dtab": dtab, "levels": levels, "A": A, "S": S, "load": load, "cpin": cpin, "tables": (X, Y, V),
+                           "ends": ends, "tags": list(tags), "sinks": sinks, "drv": drv,
+                           "end_req": {e: e[0] + float(A[e[6], RF.index(e[3]), e[2]]) + wget(e[2], e[4]) for e in ends}}
+    return extra | {"period_ns": period_ns, "wns_ns": round(wns, 4), "tns_ns": round(sum(min(0.0, s) for s in worst.values()), 3),
             "endpoints": len(worst), "failing_endpoints": sum(s < 0 for s in worst.values()),
             "fmax_mhz": round(1000.0 / t_req, 1) if t_req > 0 else None,
             "whs_ns": round(min(holds), 4) if holds else None,

@@ -290,13 +290,14 @@ def test_setup_repair_keeps_the_better_strategy(lib, tmp_path):
     buffer.cts(net, lib, lef, pl)
     T = 1.3
     area = lambda: sum(lib[t].area for _, t in net.cells)
-    cost = lambda: (area() / 1000, area())        # any monotone stand-in for power: the rule is what is tested
+    cost = lambda net_len: (area() / 1000, area())   # any monotone stand-in for power: the rule is what is tested
     r, t = size.close_setup(net, lib, lef, pl, T, cost)
     c = r["candidates"]
     assert set(c) == {"sizing", "useful_skew+sizing"}
     best = max(c, key=lambda k: (min(c[k]["wns_ns"], 0.0), -c[k]["power_mw"], -c[k]["area_um2"]))
     assert r["chosen"] == best
-    assert sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"] == t["wns_ns"] == c[best]["wns_ns"]
+    assert sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"] == t["wns_ns"] == c[best]["wns_placed_ns"]
+    assert all(v["judged_on"] == "routed" for v in c.values())
     assert area() == pytest.approx(c[best]["area_um2"], abs=0.1)              # the kept state is the chosen one
     assert ("useful_skew" in r) == (best == "useful_skew+sizing")
     assert designs.systolic_tb(sim.Simulator(net, lib), p, np.random.default_rng(0))["mismatches"] == 0
