@@ -113,9 +113,8 @@ def repair_design(net, lib, lef, pl, period_ns, max_fanout=16, buf="BUF_X4", siz
                and sum(s[0] != "port" for s in sinks[n]) > max_fanout]
     added = sum(buffer_tree(net, lib, lef, pl, n, buf, max_fanout, "buf_") for n in targets)
     upsized = 0
-    tm = sta.Timer(net, lib, period_ns, pl, macros)     # after buffering; the rounds below only resize
     for _ in range(size_rounds):
-        t = tm.report(hold=False)
+        t = sta.analyze(net, lib, period_ns, pl, macros, hold=False)
         drv, _ = net.drivers_sinks(lib)
         cells = {drv[n][0] for n in t["slow_nets"] | t["cap_nets"] if n in drv and drv[n][0] != "port"}
         bump = [c for c in cells if _bigger(lib, net.cells[c][1])]
@@ -124,7 +123,6 @@ def repair_design(net, lib, lef, pl, period_ns, max_fanout=16, buf="BUF_X4", siz
         for c in bump:
             net.cells[c] = (net.cells[c][0], _bigger(lib, net.cells[c][1]))
             pl.w[c] = macros[net.cells[c][1]].width
-        tm.resize(bump)
         upsized += len(bump)
     _legalize(pl, lef)
     t = sta.analyze(net, lib, period_ns, pl, macros, hold=False)

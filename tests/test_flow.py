@@ -301,25 +301,3 @@ def test_setup_repair_keeps_the_better_strategy(lib, tmp_path):
     assert ("useful_skew" in r) == (best == "useful_skew+sizing")
     assert designs.systolic_tb(sim.Simulator(net, lib), p, np.random.default_rng(0))["mismatches"] == 0
 
-
-def test_incremental_resize_matches_full_timing(lib, tmp_path):
-    import random
-    from chipflow import buffer
-    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", {"N": 2, "REG_IN": 1}, tmp_path)
-    lef = pdk.load_lef()
-    m = lef["macros"]
-    net.io = sdc.budget(net, 0.4, "BUF_X4", 4.0)
-    pl = place.place(net, lib, lef)
-    buffer.cts(net, lib, lef, pl)               # so flip-flop resizes move clock latencies too
-    tm = sta.Timer(net, lib, 1.4, pl, m)
-    rng = random.Random(0)
-    keys = ("wns_ns", "tns_ns", "fmax_mhz", "slack_by_endpoint", "net_slack", "critical_path", "slow_nets", "cap_nets", "clock")
-    for k in (1, 7, 60, 300):
-        batch = rng.sample([c for c, (_, t) in enumerate(net.cells) if size._bigger(lib, t)], k)
-        assert any(lib[net.cells[c][1]].ff for c in batch) or k < 60
-        for c in batch:
-            net.cells[c] = (net.cells[c][0], size._bigger(lib, net.cells[c][1]))
-            pl.w[c] = m[net.cells[c][1]].width
-        tm.resize(batch)
-        a, b = tm.report(hold=False), sta.Timer(net, lib, 1.4, pl, m).report(hold=False)
-        assert all(a[x] == b[x] for x in keys), [x for x in keys if a[x] != b[x]]

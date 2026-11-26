@@ -26,8 +26,7 @@ def upsize(net, lib, lef, pl, period_ns, max_rounds=40, log=None, net_len=None) 
     """net_len: routed lengths for post-route sizing (else placed HPWL estimates)."""
     macros = lef["macros"]
     area = lambda: float(sum(lib[t].area for _, t in net.cells))
-    tm = sta.Timer(net, lib, period_ns, pl, macros, net_len)   # rounds only change cell types: re-time incrementally
-    t = tm.report(hold=False)
+    t = sta.analyze(net, lib, period_ns, pl, macros, net_len, hold=False)
     start = {"wns_ns": t["wns_ns"], "area_um2": round(area(), 1)}
     changed, batch_frac, rounds = set(), 0.25, 0
     while rounds < max_rounds and t["wns_ns"] < 0:
@@ -48,8 +47,7 @@ def upsize(net, lib, lef, pl, period_ns, max_rounds=40, log=None, net_len=None) 
             inst, typ = net.cells[c]
             net.cells[c] = (inst, _bigger(lib, typ))
             pl.w[c] = macros[net.cells[c][1]].width
-        tm.resize(batch)
-        t2 = tm.report(hold=False)
+        t2 = sta.analyze(net, lib, period_ns, pl, macros, net_len, hold=False)
         if t2["wns_ns"] > t["wns_ns"] + 1e-4:
             t = t2
             changed.update(batch)
@@ -59,7 +57,6 @@ def upsize(net, lib, lef, pl, period_ns, max_rounds=40, log=None, net_len=None) 
             for c, v in old.items():
                 net.cells[c] = v
                 pl.w[c] = macros[v[1]].width
-            tm.resize(batch)
             if len(batch) == 1:
                 break
             batch_frac /= 2
