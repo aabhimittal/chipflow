@@ -107,68 +107,88 @@ def flow(a):
             f"{rep['repair']['violations_before']['slew']}/{rep['repair']['violations_before']['cap']} -> "
             f"{rep['repair']['violations_after']['slew']}/{rep['repair']['violations_after']['cap']}")
     t_pl = rep["repair"].pop("sta") if a.buffer else sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], hold=False)
-    skew = a.useful_skew and a.cts
-    if (a.size or skew) and t_pl["wns_ns"] < 0:   # setup repair: try sizing vs. useful skew + sizing, keep the cheaper
-        act = []   # activity after design-rule repair, simulated once and only if two strategies are compared
+    def finish(pl, r):
+        """Everything after setup repair: hold, routing (with congestion re-placement), post-route
+        repair, timing and power. Fills r; returns (placement, route, routed timing)."""
+        if a.cts:
+            r["hold_fix"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns)
+            log(f"      hold: worst slack {r['hold_fix']['whs_after_ns']:+.3f} ns, {r['hold_fix']['buffers']} delay buffers")
+        t_pl = r["hold_fix"].pop("sta") if a.cts else sta.analyze(net, lib, a.clock_ns, pl, lef["macros"])
+        r["sta_placed"] = _summary(t_pl)
+        log(f"      WNS {t_pl['wns_ns']:+.3f} ns, fmax {t_pl['fmax_mhz']} MHz, skew {t_pl['clock']['skew_ns']} ns")
+        r["verify_backend"], s = simulate("re-verified after clock tree, buffering and sizing")
 
-        def cost(net_len):
-            if not act:
-                act.append(simulate("after design-rule repair (activity for the repair's power estimate)")[1])
-            return (power.analyze(net, lib, L["voltage"], a.clock_ns, act[0].toggles, act[0].cycles, 64, net_len)["total_mw"],
-                    sum(lib[t].area for _, t in net.cells))
-        rr, t_pl = size.close_setup(net, lib, lef, pl, a.clock_ns, cost, skew=skew, sizing=a.size, log=log)
+        log("[5/8] global routing")
+        rt = route.route(net, lib, pl, lef, log=log)
+        rounds = 0
+        while rt["overflow"] and rounds < a.routability_rounds:  # inflate congested cells, re-place, reroute
+            rounds += 1
+            f = route.inflation(pl, rt["grid_obj"])
+            log(f"      overflow {rt['overflow']}: routability round {rounds}, inflating {int((f > 1).sum())} cells and re-placing")
+            pl = place.place(net, lib, lef, util=a.util, seed=a.seed, init=np.stack([pl.x + pl.w / 2, pl.y + pl.h / 2], 1),
+                             inflate=f, net_weight=weights)
+            rt = route.route(net, lib, pl, lef)
+        if rounds:
+            r["place"] = {k: v for k, v in pl.stats.items() if k != "gp_hist"} | {
+                k: r["place"][k] for k in ("timing_driven_nets",) if k in r["place"]}
+            r["sta_placed"] = _summary(sta.analyze(net, lib, a.clock_ns, pl, lef["macros"]))
+        r["route"] = {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")} | {"routability_rounds": rounds}
+        log(f"      wirelength {rt['wirelength_um']:.0f} um, overflow {rt['overflow']}, peak edge use {rt['max_util']:.2f}")
+
+        log("[6/8] timing after routing")
+        t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
+        if a.size and t_rt["wns_ns"] < 0:  # post-route repair on routed lengths, then reroute the moved cells
+            r["sizing_post_route"] = size.upsize(net, lib, lef, pl, a.clock_ns, log=log, net_len=rt["net_len"])
+            r["sizing_post_route"].pop("sta")
+            rt = route.route(net, lib, pl, lef)
+            r["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
+            t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
+            log(f"      post-route sizing: {r['sizing_post_route']['cells_upsized']} cells, rerouted overflow {rt['overflow']}")
+        if a.cts and t_rt["hold_failing"]:  # post-route hold repair on routed lengths, then reroute
+            r["hold_fix_post_route"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns, net_len=rt["net_len"])
+            r["hold_fix_post_route"].pop("sta")
+            rt = route.route(net, lib, pl, lef)
+            r["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
+            t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
+            log(f"      post-route hold fix: {r['hold_fix_post_route']['buffers']} delay buffers, rerouted overflow {rt['overflow']}")
+        r["sta_routed"] = _summary(t_rt)
+        r["critical_path"] = [{k: v for k, v in st.items() if k != "idx"} for st in t_rt["critical_path"]]
+        log(f"      setup WNS {t_rt['wns_ns']:+.3f} ns, TNS {t_rt['tns_ns']} ns, fmax {t_rt['fmax_mhz']} MHz, {len(t_rt['critical_path'])} stages; "
+            f"hold WHS {t_rt['whs_ns']:+.3f} ns ({t_rt['hold_failing']} failing); clock skew {t_rt['clock']['skew_ns']} ns")
+
+        log("[7/8] power")
+        r["power"] = power.analyze(net, lib, L["voltage"], a.clock_ns, s.toggles, s.cycles, 64, rt["net_len"])
+        log(f"      {r['power']['total_mw']} mW (clock {r['power']['clock_mw']} mW)")
+
+        return pl, rt, t_rt
+
+    skew = a.useful_skew and a.cts
+    done = None
+    if (a.size or skew) and t_pl["wns_ns"] < 0:   # setup repair: try sizing vs. useful skew + sizing, keep the better
+        finished = {}
+
+        def judge(name):   # run the rest of the flow on this candidate, keep the result, put the netlist back
+            log(f"      -- lookahead: {name} --")
+            snap, r = buffer.snapshot(net, pl), {"place": dict(rep["place"])}
+            pl2, rt2, t2 = finish(pl, r)
+            finished[name] = (buffer.snapshot(net, pl2), pl2, rt2, t2, r)
+            score = {"wns_ns": t2["wns_ns"], "power_mw": r["power"]["total_mw"],
+                     "area_um2": round(sum(lib[t].area for _, t in net.cells), 1), "judged_on": "full back end"}
+            buffer.restore(net, pl, snap)    # the finished netlist is scored above, before this
+            return score
+        rr, t_pl = size.close_setup(net, lib, lef, pl, a.clock_ns, judge, skew=skew, sizing=a.size, log=log)
         rep["timing_repair"] = {k: rr.pop(k) for k in ("chosen", "candidates")}
         rep |= rr   # the chosen strategy's "useful_skew" / "sizing" reports
         log(f"      setup repair: kept {rep['timing_repair']['chosen']}")
-    if a.cts:
-        rep["hold_fix"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns)
-        log(f"      hold: worst slack {rep['hold_fix']['whs_after_ns']:+.3f} ns, {rep['hold_fix']['buffers']} delay buffers")
-    t_pl = rep["hold_fix"].pop("sta") if a.cts else sta.analyze(net, lib, a.clock_ns, pl, lef["macros"])
-    rep["sta_placed"] = _summary(t_pl)
-    log(f"      WNS {t_pl['wns_ns']:+.3f} ns, fmax {t_pl['fmax_mhz']} MHz, skew {t_pl['clock']['skew_ns']} ns")
-    rep["verify_backend"], s = simulate("re-verified after clock tree, buffering and sizing")
-
-    log("[5/8] global routing")
-    rt = route.route(net, lib, pl, lef, log=log)
-    rounds = 0
-    while rt["overflow"] and rounds < a.routability_rounds:  # inflate congested cells, re-place, reroute
-        rounds += 1
-        f = route.inflation(pl, rt["grid_obj"])
-        log(f"      overflow {rt['overflow']}: routability round {rounds}, inflating {int((f > 1).sum())} cells and re-placing")
-        pl = place.place(net, lib, lef, util=a.util, seed=a.seed, init=np.stack([pl.x + pl.w / 2, pl.y + pl.h / 2], 1),
-                         inflate=f, net_weight=weights)
-        rt = route.route(net, lib, pl, lef)
-    if rounds:
-        rep["place"] = {k: v for k, v in pl.stats.items() if k != "gp_hist"} | {
-            k: rep["place"][k] for k in ("timing_driven_nets",) if k in rep["place"]}
-        rep["sta_placed"] = _summary(sta.analyze(net, lib, a.clock_ns, pl, lef["macros"]))
-    rep["route"] = {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")} | {"routability_rounds": rounds}
-    log(f"      wirelength {rt['wirelength_um']:.0f} um, overflow {rt['overflow']}, peak edge use {rt['max_util']:.2f}")
-
-    log("[6/8] timing after routing")
-    t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
-    if a.size and t_rt["wns_ns"] < 0:  # post-route repair on routed lengths, then reroute the moved cells
-        rep["sizing_post_route"] = size.upsize(net, lib, lef, pl, a.clock_ns, log=log, net_len=rt["net_len"])
-        rep["sizing_post_route"].pop("sta")
-        rt = route.route(net, lib, pl, lef)
-        rep["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
-        t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
-        log(f"      post-route sizing: {rep['sizing_post_route']['cells_upsized']} cells, rerouted overflow {rt['overflow']}")
-    if a.cts and t_rt["hold_failing"]:  # post-route hold repair on routed lengths, then reroute
-        rep["hold_fix_post_route"] = buffer.fix_hold(net, lib, lef, pl, a.clock_ns, net_len=rt["net_len"])
-        rep["hold_fix_post_route"].pop("sta")
-        rt = route.route(net, lib, pl, lef)
-        rep["route"] |= {k: v for k, v in rt.items() if k not in ("net_len", "grid_obj", "conns")}
-        t_rt = sta.analyze(net, lib, a.clock_ns, pl, lef["macros"], rt["net_len"])
-        log(f"      post-route hold fix: {rep['hold_fix_post_route']['buffers']} delay buffers, rerouted overflow {rt['overflow']}")
-    rep["sta_routed"] = _summary(t_rt)
-    rep["critical_path"] = [{k: v for k, v in st.items() if k != "idx"} for st in t_rt["critical_path"]]
-    log(f"      setup WNS {t_rt['wns_ns']:+.3f} ns, TNS {t_rt['tns_ns']} ns, fmax {t_rt['fmax_mhz']} MHz, {len(t_rt['critical_path'])} stages; "
-        f"hold WHS {t_rt['whs_ns']:+.3f} ns ({t_rt['hold_failing']} failing); clock skew {t_rt['clock']['skew_ns']} ns")
-
-    log("[7/8] power")
-    rep["power"] = power.analyze(net, lib, L["voltage"], a.clock_ns, s.toggles, s.cycles, 64, rt["net_len"])
-    log(f"      {rep['power']['total_mw']} mW (clock {rep['power']['clock_mw']} mW)")
+        done = finished.get(rep["timing_repair"]["chosen"])
+    if done:   # the chosen candidate already ran the rest of the flow: adopt its finished state
+        snap, pl, rt, t_rt, r = done
+        buffer.restore(net, pl, snap)
+        rep |= r
+        area = sum(lib[t].area for _, t in net.cells)
+        assert round(area, 1) == rep["timing_repair"]["candidates"][rep["timing_repair"]["chosen"]]["area_um2"]
+    else:
+        pl, rt, t_rt = finish(pl, rep)
 
     log("[8/8] outputs")
     layout.write_def(out / "placed.def", net, pl, lef)
