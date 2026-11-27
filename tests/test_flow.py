@@ -71,8 +71,8 @@ def test_backend_is_legal_connected_and_timed(lib, sa2):
     assert rt["overflow"] == 0
     for _, a, b, path in rt["conns"]:                # every 2-pin connection is one connected path
         adj = collections.defaultdict(set)
-        for k, y, x in path:
-            u, v = ((x, y), (x + 1, y)) if k == "h" else ((x, y), (x, y + 1))
+        for k, y, x in path.tolist():
+            u, v = ((x, y), (x + 1, y)) if k == 0 else ((x, y), (x, y + 1))
             adj[u].add(v)
             adj[v].add(u)
         seen, todo = {a}, [a]
@@ -290,14 +290,18 @@ def test_setup_repair_keeps_the_better_strategy(lib, tmp_path):
     buffer.cts(net, lib, lef, pl)
     T = 1.3
     area = lambda: sum(lib[t].area for _, t in net.cells)
-    cost = lambda net_len: (area() / 1000, area())   # any monotone stand-in for power: the rule is what is tested
-    r, t = size.close_setup(net, lib, lef, pl, T, cost)
+    seen = []
+
+    def judge(name):    # stand-in for the rest of the flow: placed timing, area as "power"; the rule is what is tested
+        seen.append(name)
+        return {"wns_ns": sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"], "power_mw": area() / 1000, "area_um2": area()}
+    r, t = size.close_setup(net, lib, lef, pl, T, judge)
+    assert seen == ["sizing", "useful_skew+sizing"]
     c = r["candidates"]
     assert set(c) == {"sizing", "useful_skew+sizing"}
     best = max(c, key=lambda k: (min(c[k]["wns_ns"], 0.0), -c[k]["power_mw"], -c[k]["area_um2"]))
     assert r["chosen"] == best
-    assert sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"] == t["wns_ns"] == c[best]["wns_placed_ns"]
-    assert all(v["judged_on"] == "routed" for v in c.values())
+    assert sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"] == t["wns_ns"] == c[best]["wns_ns"]
     assert area() == pytest.approx(c[best]["area_um2"], abs=0.1)              # the kept state is the chosen one
     assert ("useful_skew" in r) == (best == "useful_skew+sizing")
     assert designs.systolic_tb(sim.Simulator(net, lib), p, np.random.default_rng(0))["mismatches"] == 0
@@ -330,3 +334,26 @@ def test_vector_engine_matches_python_engine(lib, tmp_path):
     with pytest.raises(AssertionError):                                       # tags made on the way: Python only
         sta.analyze(net, lib, 1.6, pl, lef["macros"], engine="vec")
     assert sta.analyze(net, lib, 1.6, pl, lef["macros"])["wns_ns"] is not None   # auto falls back
+
+
+def test_detailed_routing_is_short_free_connected_and_on_track(lib, tmp_path):
+    from chipflow import detail, layout
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", {"N": 2, "REG_IN": 1}, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    rt = route.route(net, lib, pl, lef)
+    det = detail.route(net, lib, pl, lef, rt)
+    assert det["shorts"] == det["opens"] == det["off_track"] == 0 and det["nets"] > 3000
+    assert det["track_assignment"]["assigned"] > 0.9 * det["track_assignment"]["runs"]
+    assert sum(det["wirelength_um"].values()) > rt["wirelength_um"] * 0.8     # comparable to the global routing
+    sol, pins = det["sol"], det["pins"]
+    a, b = sorted(sol)[:2]                                    # the checker sees a planted short and a planted open
+    bad = dict(sol) | {a: (np.r_[sol[a][0], sol[b][0][:1]], sol[a][1])}
+    assert detail.check(bad, pins, det["grid"])["shorts"] == 1
+    n = next(k for k in sorted(sol) if len(sol[k][1]) > 2)
+    cut = dict(sol) | {n: (sol[n][0], sol[n][1][1:])}
+    assert detail.check(cut, pins, det["grid"])["opens"] == 1
+    out = tmp_path / "routed.def"
+    layout.write_def(out, net, pl, lef, detail.def_wires(det), lib)
+    text = out.read_text()
+    assert text.count("+ ROUTED") == det["nets"] and "via2_8" in text and "via1_4" in text and "END NETS" in text

@@ -12,6 +12,7 @@ from __future__ import annotations
 import heapq
 import math
 
+import numba
 import numpy as np
 
 from chipflow import pdk
@@ -63,53 +64,109 @@ class Grid:
             (self.use_h if kind == "h" else self.use_v)[y, x] += sign
 
 
-def _l_paths(a, b):
-    (x1, y1), (x2, y2) = a, b
-    out = []
-    for corner in ((x2, y1), (x1, y2)):
-        p = []
-        for (ax, ay), (bx, by) in ((a, corner), (corner, b)):
-            if ay == by and ax != bx:
-                p += [("h", ay, x) for x in range(min(ax, bx), max(ax, bx))]
-            elif ax == bx and ay != by:
-                p += [("v", y, ax) for y in range(min(ay, by), max(ay, by))]
-        out.append(p)
-    return out
+@numba.njit(cache=True)
+def _cost(use, cap, hist, pres, y, x):
+    return (1 + hist[y, x]) * (1 + pres * max(0.0, use[y, x] + 1 - cap[y, x]))   # Grid.cost_h/cost_v, one edge
 
 
-def _path_cost(path, ch, cv):
-    return sum((ch if k == "h" else cv)[y, x] for k, y, x in path)
+@numba.njit(cache=True)
+def _l_edges(x1, y1, x2, y2, corner_first_h):
+    """Edges (kind 0=h, 1=v, y, x) of the L through (x2, y1) if corner_first_h, else through (x1, y2)."""
+    n = abs(x2 - x1) + abs(y2 - y1)
+    out = np.empty((n, 3), np.int64)
+    k = 0
+    cx, cy = (x2, y1) if corner_first_h else (x1, y2)
+    for (ax, ay), (bx, by) in (((x1, y1), (cx, cy)), ((cx, cy), (x2, y2))):
+        if ay == by and ax != bx:
+            for x in range(min(ax, bx), max(ax, bx)):
+                out[k, 0], out[k, 1], out[k, 2] = 0, ay, x
+                k += 1
+        elif ax == bx and ay != by:
+            for y in range(min(ay, by), max(ay, by)):
+                out[k, 0], out[k, 1], out[k, 2] = 1, y, ax
+                k += 1
+    return out[:k]
 
 
-def _astar(grid, a, b, ch, cv, margin=6):
-    x0, x1 = max(0, min(a[0], b[0]) - margin), min(grid.nx - 1, max(a[0], b[0]) + margin)
-    y0, y1 = max(0, min(a[1], b[1]) - margin), min(grid.ny - 1, max(a[1], b[1]) + margin)
-    dist = {a: 0.0}
-    prev = {}
-    heap = [(abs(a[0] - b[0]) + abs(a[1] - b[1]), 0.0, a)]
+@numba.njit(cache=True)
+def _path_cost(e, uh, uv, ch, cv, hh, hv, pres):
+    s = 0.0
+    for i in range(len(e)):
+        s += _cost(uh, ch, hh, pres, e[i, 1], e[i, 2]) if e[i, 0] == 0 else _cost(uv, cv, hv, pres, e[i, 1], e[i, 2])
+    return s
+
+
+@numba.njit(cache=True)
+def _commit(e, uh, uv, sign):
+    for i in range(len(e)):
+        if e[i, 0] == 0:
+            uh[e[i, 1], e[i, 2]] += sign
+        else:
+            uv[e[i, 1], e[i, 2]] += sign
+
+
+@numba.njit(cache=True)
+def _pattern(ends, uh, uv, ch, cv, hh, hv, pres):
+    """Initial routing: each connection, in order, takes the cheaper of its two L shapes (ties: the
+    one through (x2, y1)) under the congestion the earlier ones left. Returns 1 per connection that
+    took the (x2, y1) shape."""
+    first = np.zeros(len(ends), np.bool_)
+    for i in range(len(ends)):
+        x1, y1, x2, y2 = ends[i, 0], ends[i, 1], ends[i, 2], ends[i, 3]
+        a, b = _l_edges(x1, y1, x2, y2, True), _l_edges(x1, y1, x2, y2, False)
+        first[i] = _path_cost(a, uh, uv, ch, cv, hh, hv, pres) <= _path_cost(b, uh, uv, ch, cv, hh, hv, pres)
+        _commit(a if first[i] else b, uh, uv, 1)
+    return first
+
+
+@numba.njit(cache=True)
+def _reroute(old, x1, y1, x2, y2, nx, ny, margin, uh, uv, ch, cv, hh, hv, pres):
+    """Rip up `old`, find the cheapest path with A* inside the connection's box grown by `margin`
+    gcells (costs read live from the usage), commit it and return it (edges from b back to a)."""
+    _commit(old, uh, uv, -1)
+    x0, xm = max(0, min(x1, x2) - margin), min(nx - 1, max(x1, x2) + margin)
+    y0, ym = max(0, min(y1, y2) - margin), min(ny - 1, max(y1, y2) + margin)
+    W, H = xm - x0 + 1, ym - y0 + 1
+    dist = np.full((H, W), np.inf)
+    prev = np.full((H, W, 3), -1, np.int64)          # predecessor x, y and the edge kind
+    dist[y1 - y0, x1 - x0] = 0.0
+    heap = [(float(abs(x1 - x2) + abs(y1 - y2)), 0.0, x1, y1)]
     while heap:
-        _, d, u = heapq.heappop(heap)
-        if u == b:
+        _, d, x, y = heapq.heappop(heap)
+        if x == x2 and y == y2:
             break
-        if d > dist.get(u, math.inf):
+        if d > dist[y - y0, x - x0]:
             continue
-        x, y = u
-        for v, edge in (((x + 1, y), ("h", y, x)), ((x - 1, y), ("h", y, x - 1)),
-                        ((x, y + 1), ("v", y, x)), ((x, y - 1), ("v", y - 1, x))):
-            if not (x0 <= v[0] <= x1 and y0 <= v[1] <= y1):
+        for k in range(4):
+            if k == 0:
+                vx, vy, kind, ey, ex = x + 1, y, 0, y, x
+            elif k == 1:
+                vx, vy, kind, ey, ex = x - 1, y, 0, y, x - 1
+            elif k == 2:
+                vx, vy, kind, ey, ex = x, y + 1, 1, y, x
+            else:
+                vx, vy, kind, ey, ex = x, y - 1, 1, y - 1, x
+            if not (x0 <= vx <= xm and y0 <= vy <= ym):
                 continue
-            nd = d + (ch if edge[0] == "h" else cv)[edge[1], edge[2]]
-            if nd < dist.get(v, math.inf):
-                dist[v], prev[v] = nd, (u, edge)
-                heapq.heappush(heap, (nd + abs(v[0] - b[0]) + abs(v[1] - b[1]), nd, v))
-    path, u = [], b
-    while u != a:
-        u, edge = prev[u]
-        path.append(edge)
+            nd = d + (_cost(uh, ch, hh, pres, ey, ex) if kind == 0 else _cost(uv, cv, hv, pres, ey, ex))
+            if nd < dist[vy - y0, vx - x0]:
+                dist[vy - y0, vx - x0] = nd
+                prev[vy - y0, vx - x0, 0], prev[vy - y0, vx - x0, 1], prev[vy - y0, vx - x0, 2] = x, y, kind
+                heapq.heappush(heap, (nd + abs(vx - x2) + abs(vy - y2), nd, vx, vy))
+    out = np.empty((W * H, 3), np.int64)             # a path visits each box gcell at most once
+    n, x, y = 0, x2, y2
+    while not (x == x1 and y == y1):
+        px, py, kind = prev[y - y0, x - x0, 0], prev[y - y0, x - x0, 1], prev[y - y0, x - x0, 2]
+        out[n, 0], out[n, 1], out[n, 2] = kind, min(y, py), min(x, px)
+        n += 1
+        x, y = px, py
+    path = out[:n].copy()
+    _commit(path, uh, uv, 1)
     return path
 
 
 def route(net, lib, pl, lef, gcell_rows: float = 2.0, iters: int = 30, log=None) -> dict:
+    """Paths are (k, 3) int arrays of edges (kind 0 = horizontal, 1 = vertical; y; x)."""
     macros = lef["macros"]
     grid = Grid(pl.die, gcell_rows * pl.row_h, lef)
     g = grid.g
@@ -125,16 +182,11 @@ def route(net, lib, pl, lef, gcell_rows: float = 2.0, iters: int = 30, log=None)
         local_len[n] = (max(xs) - min(xs) + max(ys) - min(ys)) if len(cells) == 1 else 0.0
         for i, j in _mst(cells):
             conns.append([n, cells[i], cells[j], None])
-    ch, cv = grid.cost_h(), grid.cost_v()
-    for c in conns:  # initial pattern routing, congestion-aware but costs refreshed lazily
-        a, b = _l_paths(c[1], c[2])
-        c[3] = a if _path_cost(a, ch, cv) <= _path_cost(b, ch, cv) else b
-        grid.commit(c[3])
-        for k, y, x in c[3]:
-            if k == "h":
-                ch[y, x] = (1 + grid.hist_h[y, x]) * (1 + grid.pres * max(0, grid.use_h[y, x] + 1 - grid.cap_h[y, x]))
-            else:
-                cv[y, x] = (1 + grid.hist_v[y, x]) * (1 + grid.pres * max(0, grid.use_v[y, x] + 1 - grid.cap_v[y, x]))
+    ends = np.array([(a[0], a[1], b[0], b[1]) for _, a, b, _ in conns], np.int64).reshape(-1, 4)
+    args = (grid.cap_h, grid.cap_v, grid.hist_h, grid.hist_v)
+    first = _pattern(ends, grid.use_h, grid.use_v, *args, grid.pres)
+    for c, e, f in zip(conns, ends, first):
+        c[3] = _l_edges(e[0], e[1], e[2], e[3], bool(f))
     hist = []
     for it in range(iters):
         oh, ov = grid.use_h > grid.cap_h, grid.use_v > grid.cap_v
@@ -147,14 +199,14 @@ def route(net, lib, pl, lef, gcell_rows: float = 2.0, iters: int = 30, log=None)
         grid.hist_h += oh
         grid.hist_v += ov
         grid.pres *= 1.6
-        bad = [c for c in conns if any((oh if k == "h" else ov)[y, x] for k, y, x in c[3])]
-        for c in bad:
-            grid.commit(c[3], -1)
-            c[3] = _astar(grid, c[1], c[2], grid.cost_h(), grid.cost_v()) if len(bad) < 400 else None
-            if c[3] is None:  # many victims: refresh costs per batch to keep it fast
-                ch, cv = grid.cost_h(), grid.cost_v()
-                c[3] = _astar(grid, c[1], c[2], ch, cv)
-            grid.commit(c[3])
+        flat = np.concatenate([c[3] for c in conns])
+        hit = np.where(flat[:, 0] == 0, oh[flat[:, 1], np.minimum(flat[:, 2], grid.nx - 2)],
+                       ov[np.minimum(flat[:, 1], grid.ny - 2), flat[:, 2]])
+        cut = np.cumsum([0] + [len(c[3]) for c in conns])
+        bad = [conns[i] for i in np.flatnonzero(np.add.reduceat(hit, cut[:-1]) > 0) if cut[i + 1] > cut[i]]
+        for c in bad:   # rip up and reroute, in connection order, each against the live congestion
+            c[3] = _reroute(c[3], c[1][0], c[1][1], c[2][0], c[2][1], grid.nx, grid.ny, 6,
+                            grid.use_h, grid.use_v, *args, grid.pres)
     net_len = dict(local_len)
     for n, _, _, path in conns:
         net_len[n] = net_len.get(n, 0.0) + len(path) * g
