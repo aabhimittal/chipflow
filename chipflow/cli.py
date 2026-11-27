@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from chipflow import buffer, designs, layout, pdk, place, power, route, sdc, sim, size, sta, synth
+from chipflow import buffer, designs, detail, layout, pdk, place, power, route, sdc, sim, size, sta, synth
 
 
 def _clean(o):
@@ -190,8 +190,17 @@ def flow(a):
     else:
         pl, rt, t_rt = finish(pl, rep)
 
+    wires = None
+    if a.detail:   # track assignment + detailed routing on the metal tracks (not timed: global lengths are)
+        log("      track assignment + detailed routing")
+        det = detail.route(net, lib, pl, lef, rt, log=log)
+        rep["detail"] = {k: v for k, v in det.items() if k not in ("sol", "pins", "grid")}
+        wires = detail.def_wires(det)
+        log(f"      detailed: {det['nets']} nets, {det['shorts']} shorts, {det['opens']} opens, {det['off_track']} off-track, "
+            f"{sum(det['wirelength_um'].values()):.0f} um, {sum(det['vias'].values())} vias")
+
     log("[8/8] outputs")
-    layout.write_def(out / "placed.def", net, pl, lef)
+    layout.write_def(out / "placed.def", net, pl, lef, wires, lib)
     layout.write_svg(out / "layout.svg", net, pl, lib, [st["idx"] for st in t_rt["critical_path"] if "idx" in st])
     layout.write_congestion_svg(out / "congestion.svg", rt["grid_obj"])
     rep["seconds"] = round(time.time() - t0, 1)
@@ -218,6 +227,8 @@ def main(argv=None):
     f.add_argument("--timing-driven", action=argparse.BooleanOptionalAction, default=True, help="re-place with critical nets weighted")
     f.add_argument("--size", action=argparse.BooleanOptionalAction, default=True, help="upsize cells when timing fails")
     f.add_argument("--cts", action=argparse.BooleanOptionalAction, default=True, help="build a clock tree, check and fix hold")
+    f.add_argument("--detail", action=argparse.BooleanOptionalAction, default=False,
+                   help="track assignment + detailed routing on metal2-6, wires in the DEF (about 4x the flow's runtime)")
     f.add_argument("--useful-skew", action=argparse.BooleanOptionalAction, default=True,
                    help="when setup fails, delay capture clocks of critical flip-flops (before sizing)")
     f.add_argument("--io", action=argparse.BooleanOptionalAction, default=True, help="time ports with I/O constraints")

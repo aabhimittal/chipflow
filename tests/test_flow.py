@@ -334,3 +334,26 @@ def test_vector_engine_matches_python_engine(lib, tmp_path):
     with pytest.raises(AssertionError):                                       # tags made on the way: Python only
         sta.analyze(net, lib, 1.6, pl, lef["macros"], engine="vec")
     assert sta.analyze(net, lib, 1.6, pl, lef["macros"])["wns_ns"] is not None   # auto falls back
+
+
+def test_detailed_routing_is_short_free_connected_and_on_track(lib, tmp_path):
+    from chipflow import detail, layout
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", {"N": 2, "REG_IN": 1}, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    rt = route.route(net, lib, pl, lef)
+    det = detail.route(net, lib, pl, lef, rt)
+    assert det["shorts"] == det["opens"] == det["off_track"] == 0 and det["nets"] > 3000
+    assert det["track_assignment"]["assigned"] > 0.9 * det["track_assignment"]["runs"]
+    assert sum(det["wirelength_um"].values()) > rt["wirelength_um"] * 0.8     # comparable to the global routing
+    sol, pins = det["sol"], det["pins"]
+    a, b = sorted(sol)[:2]                                    # the checker sees a planted short and a planted open
+    bad = dict(sol) | {a: (np.r_[sol[a][0], sol[b][0][:1]], sol[a][1])}
+    assert detail.check(bad, pins, det["grid"])["shorts"] == 1
+    n = next(k for k in sorted(sol) if len(sol[k][1]) > 2)
+    cut = dict(sol) | {n: (sol[n][0], sol[n][1][1:])}
+    assert detail.check(cut, pins, det["grid"])["opens"] == 1
+    out = tmp_path / "routed.def"
+    layout.write_def(out, net, pl, lef, detail.def_wires(det), lib)
+    text = out.read_text()
+    assert text.count("+ ROUTED") == det["nets"] and "via2_8" in text and "via1_4" in text and "END NETS" in text

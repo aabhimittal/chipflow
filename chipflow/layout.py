@@ -10,7 +10,8 @@ import numpy as np
 DBU = 2000  # Nangate45 LEF database units per micron
 
 
-def write_def(path, net, pl, lef):
+def write_def(path, net, pl, lef, wires=None, lib=None):
+    """wires: {net id: [DEF routing pieces]} from chipflow.detail.def_wires (needs lib) adds a NETS section."""
     d = lambda v: int(round(v * DBU))
     sw, rh = lef["site"]
     site = "FreePDK45_38x28_10R_NP_162NW_34O"
@@ -33,7 +34,24 @@ def write_def(path, net, pl, lef):
         nm = f"{p}[{b}]" if len(net.ports[p][1]) > 1 else p
         out.append(f"- {nm} + NET {nm} + DIRECTION {dr.upper()} + USE SIGNAL + LAYER metal3 ( -70 -70 ) ( 70 70 ) "
                    f"+ PLACED ( {d(x)} {d(y)} ) N ;")
-    out += ["END PINS", "END DESIGN", ""]
+    out.append("END PINS")
+    if wires is not None:
+        drv, sinks = net.drivers_sinks(lib)
+        port_name = {n: (f"{p}[{b}]" if len(ns) > 1 else p) for p, (_, ns) in net.ports.items() for b, n in enumerate(ns)}
+        names, used = {}, set()
+        for n in sorted(wires):
+            nm = port_name.get(n) or name(net.names.get(n, [f"n{n}"])[0])
+            nm = nm if nm not in used else f"{nm}_n{n}"
+            used.add(nm)
+            names[n] = nm
+        out.append(f"NETS {len(wires)} ;")
+        for n in sorted(wires):
+            conn = " ".join(f"( PIN {port_name[n]} )" if p[0] == "port" else f"( {name(net.cells[p[0]][0])} {p[1]} )"
+                            for p in ([drv[n]] if n in drv else []) + sinks[n])
+            body = "\n    NEW ".join(wires[n])
+            out.append(f"- {names[n]} {conn}\n  + ROUTED {body} ;")
+        out.append("END NETS")
+    out += ["END DESIGN", ""]
     with open(path, "w") as f:
         f.write("\n".join(out))
 
