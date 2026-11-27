@@ -71,8 +71,8 @@ def test_backend_is_legal_connected_and_timed(lib, sa2):
     assert rt["overflow"] == 0
     for _, a, b, path in rt["conns"]:                # every 2-pin connection is one connected path
         adj = collections.defaultdict(set)
-        for k, y, x in path:
-            u, v = ((x, y), (x + 1, y)) if k == "h" else ((x, y), (x, y + 1))
+        for k, y, x in path.tolist():
+            u, v = ((x, y), (x + 1, y)) if k == 0 else ((x, y), (x, y + 1))
             adj[u].add(v)
             adj[v].add(u)
         seen, todo = {a}, [a]

@@ -21,7 +21,7 @@ Verilog ─► lint + synthesis ─► gate-level simulation ─► floorplan �
 | Constraints (SDC) | back | Reads the everyday SDC subset: `create_clock` (several, with `-waveform`), per-port `set_input_delay` / `set_output_delay` (`-clock`, `-max` / `-min`), `set_driving_cell`, `set_load`, `set_false_path` and `set_multicycle_path` with any of `-from` / `-through` / `-to` (multicycle with SDC's hold-edge rule), `set_clock_groups`, `set_clock_uncertainty`, `set` / `expr`, and `get_ports` / `get_cells` / `get_nets` / `get_clocks` / `all_*` queries. `get_cells` matches flip-flops by their RTL register name (`row[0].col[1].pe.acc[3]`). Unsupported commands are errors, not silently dropped. Without a file, the default is a budget: inputs arrive at `io-budget` × period through a `BUF_X4`, outputs must be ready as early into 4 fF. Port paths are timed for setup and hold and port nets are buffered like internal ones | `sdc.py`, `sta.py` |
 | Clock tree + buffers | back | Clock-tree synthesis: each clock's flip-flops are split by recursive median bisection into groups of ≤ 16 under a `CLKBUF_X3`, level by level up to the clock pin. Design-rule repair: nets driving > 16 pins get a `BUF_X4` tree, then drivers still over the slew or capacitance limit are upsized. Hold fixing: `BUF_X1` delay cells in front of flip-flops whose data arrives too early, where setup slack allows. **Useful skew** (when setup fails, before sizing): `CLKBUF_X1` chains on the clock pins of flip-flops capturing near-critical paths, worth half the gap between their capture and launch slack; a round is kept only if WNS improves with no new hold failures, and it stops once setup is met. **Setup repair picks its strategy by outcome**: gate sizing alone and useful skew + sizing both run from the same snapshot; each candidate is globally routed and judged on routed wire lengths: the better WNS wins, and when both meet timing, the lower power, then area | `buffer.py`, `size.py` |
 | Timing repair | back | Gate sizing: worst-slack cells move up the library's drive strengths (X1 → X2 → X4…) in batches kept only if WNS improves; runs after buffering and again on routed lengths | `size.py` |
-| Global routing | back | Gcell grid with track capacities from metal2–6 pitches; MST net decomposition; L-shape initial routes; negotiated rip-up and reroute (PathFinder) with A* | `route.py` |
+| Global routing | back | Gcell grid with track capacities from metal2–6 pitches; MST net decomposition; L-shape initial routes; negotiated rip-up and reroute (PathFinder) with A*. Pattern routing and A* run as numba kernels (routes identical to the earlier Python router) | `route.py` |
 | Power | back | Switching power from simulated toggle rates on routed net capacitance, clock-tree power (every clock net switches twice a cycle), Liberty leakage | `power.py` |
 | Outputs | back | DEF (opens in KLayout or OpenROAD), layout and congestion SVGs, JSON report | `layout.py` |
 
@@ -142,13 +142,19 @@ Red is the post-route critical path.
   backward pass cut profiled time 22%, but the unprofiled run moved 5%. Profiling taxes every
   Python call, so call-heavy code looks worse than it is; per-stage wall-clock timing showed the
   real split (above) and is what the roadmap now follows.
-- **Incremental timing that was correct and still not faster.** A `Timer` that re-evaluates only
+- **Incremental timing that was correct but not shown to pay.** A `Timer` that re-evaluates only
   cells whose inputs changed after a resize matched full analysis bit for bit on randomized
-  resizes (including flip-flops, whose clock-pin load moves clock latencies), and later sizing
-  rounds touched only 4-24% of the design. Gate sizing still took the same time (4×4: 6.3 vs
-  5.9 s; 8×8: 21.1 vs 21.7 s): each round still recomputes required times and endpoints over
-  the whole design, a rejected batch costs a second update, and sizing converges in ~9 rounds.
-  The code was removed.
+  resizes (including flip-flops, whose clock-pin load moves clock latencies), was 2.5× faster
+  per update in-process, and later sizing rounds touched only 4-24% of the design. But a
+  sizing-heavy flow (4×4 at 1.4 ns, sizing only) took the same time end to end (20.2 vs 20.8 s):
+  each round still recomputes required times and endpoints over the whole design, and sizing
+  converges in ~9 rounds. The code was removed. Correction: the isolated sizing timings first
+  quoted here (4×4: 6.3 vs 5.9 s; 8×8: 21.1 vs 21.7 s) compared the branch with itself, because a
+  script run from another checkout imported the installed (branch) package; only `python -m` runs
+  from each checkout, or `PYTHONPATH`, compare two versions. The 8×8 case was never measured.
+- **A benchmark that compared a branch with itself.** That import mistake was caught when the
+  compiled router's paths differed from "main" in an impossible way (vertical edges side by side
+  in one row): both runs had loaded the new router. With `PYTHONPATH` set, every path matched.
 - **Useful skew that overshot.** Rounds kept adding clock buffers after setup was already met:
   SIMT at 1.9 ns needed 89 ps and got 138 ps, for 1,212 buffers. Stopping at WNS ≥ 0, as sizing
   does, cut that to 858 and systolic at 1.4 ns from 984 to 450.
@@ -186,16 +192,17 @@ Red is the post-route critical path.
   unit of its `internal_power` tables, and the two Liberty readings (V²·fF = fJ, or V·mA·ns = pJ)
   differ 1000×; neither matches a 45 nm gate cleanly, so this waits for a calibration against a
   reference tool.
-- **Python router and legalizer**; placement uses PyTorch on CPU and timing numpy. The levelized
-  timer made one 8×8 timing run 2.7× faster (4.3 → 1.6 s) and the flows 1.1–1.4× faster (8×8:
-  68 → 50 s); what is left is mostly placement and routing.
+- **Python legalizer**; placement uses PyTorch on CPU, timing numpy, and the router's A* and
+  pattern routing are numba kernels. The levelized timer made one 8×8 timing run 2.7× faster
+  (4.3 → 1.6 s); the compiled router routes the congested 8×8 first pass 13× faster (224 →
+  17 s) with identical paths. Flows: 8×8 52.5 → 40.0 s, SIMT 36.1 → 29.0 s over the previous
+  release.
 
 ## Roadmap
 
-1. Vectorized router (gcell A* in numpy or a compiled kernel): routing is now the largest Python stage.
-2. Repair choices that include routability re-placement and post-route sizing in the comparison.
-3. Track assignment, then detailed routing.
-4. GPU kernels for placement density, STA propagation and routing cost updates, for designs
+1. Repair choices that include routability re-placement and post-route sizing in the comparison.
+2. Track assignment, then detailed routing.
+3. GPU kernels for placement density, STA propagation and routing cost updates, for designs
    above 100k cells.
 
 ## License
