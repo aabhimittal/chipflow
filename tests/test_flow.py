@@ -290,14 +290,43 @@ def test_setup_repair_keeps_the_better_strategy(lib, tmp_path):
     buffer.cts(net, lib, lef, pl)
     T = 1.3
     area = lambda: sum(lib[t].area for _, t in net.cells)
-    cost = lambda: (area() / 1000, area())        # any monotone stand-in for power: the rule is what is tested
+    cost = lambda net_len: (area() / 1000, area())   # any monotone stand-in for power: the rule is what is tested
     r, t = size.close_setup(net, lib, lef, pl, T, cost)
     c = r["candidates"]
     assert set(c) == {"sizing", "useful_skew+sizing"}
     best = max(c, key=lambda k: (min(c[k]["wns_ns"], 0.0), -c[k]["power_mw"], -c[k]["area_um2"]))
     assert r["chosen"] == best
-    assert sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"] == t["wns_ns"] == c[best]["wns_ns"]
+    assert sta.analyze(net, lib, T, pl, lef["macros"], hold=False)["wns_ns"] == t["wns_ns"] == c[best]["wns_placed_ns"]
+    assert all(v["judged_on"] == "routed" for v in c.values())
     assert area() == pytest.approx(c[best]["area_um2"], abs=0.1)              # the kept state is the chosen one
     assert ("useful_skew" in r) == (best == "useful_skew+sizing")
     assert designs.systolic_tb(sim.Simulator(net, lib), p, np.random.default_rng(0))["mismatches"] == 0
 
+
+
+def test_vector_engine_matches_python_engine(lib, tmp_path):
+    from chipflow import buffer
+    p = {"N": 2, "REG_IN": 1}
+    net, _ = synth.synthesize([designs.DESIGN_DIR / "systolic_array.v"], "systolic_array", p, tmp_path)
+    lef = pdk.load_lef()
+    pl = place.place(net, lib, lef)
+    buffer.cts(net, lib, lef, pl)
+    keys = ("wns_ns", "tns_ns", "whs_ns", "ths_ns", "fmax_mhz", "hold_failing", "endpoints", "slew_violations",
+            "cap_violations", "slack_by_endpoint", "hold_by_ff", "net_slack", "critical_path", "critical_endpoint",
+            "slow_nets", "cap_nets", "clock")
+    cases = [None, sdc.budget(net, 0.6, "BUF_X4", 4.0),
+             sdc.read("create_clock -period 2 [get_ports clk]\nset_input_delay 0.3 [get_ports {a_west b_north}]\n"
+                      "set_output_delay 0.5 [all_outputs]\nset_clock_uncertainty 0.04\n"
+                      "set_false_path -from [get_cells in_reg.a_q*] -to [get_cells row[0].col[0].pe.acc*]\n"
+                      "set_multicycle_path 2 -to [get_ports acc]\n", net, lib)[0]]
+    for io in cases:
+        net.io = io
+        for hold in (True, False):
+            for nl in (None, {n: 50.0 for n in range(0, net.n_nets, 7)}):      # placed and "routed" lengths
+                a = sta.analyze(net, lib, 1.6, pl, lef["macros"], nl, hold=hold, engine="py")
+                b = sta.analyze(net, lib, 1.6, pl, lef["macros"], nl, hold=hold, engine="vec")
+                assert [k for k in keys if a[k] != b[k]] == []                  # bit for bit, every field
+    net.io, _ = sdc.read("create_clock -period 2 [get_ports clk]\nset_false_path -through [get_nets in_reg.a_q*]\n", net, lib)
+    with pytest.raises(AssertionError):                                       # tags made on the way: Python only
+        sta.analyze(net, lib, 1.6, pl, lef["macros"], engine="vec")
+    assert sta.analyze(net, lib, 1.6, pl, lef["macros"])["wns_ns"] is not None   # auto falls back
